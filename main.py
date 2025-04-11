@@ -21,7 +21,6 @@ print(model.activations_ff.value[1])
 def dphi(x):
     return 1 - nnx.tanh(x) ** 2
 gtrue = - model.layers[-1].kernel @ (model.activations[-1] - model.activations_ff[-1]) * dphi(model.activations[-2]) + model.activations[-2] - model.activations_ff[-2]
-print(gtrue)
 
 print(model.activations[0] - gtrue)
 pc_step(model, jnp.ones((20,)))

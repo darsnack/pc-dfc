@@ -1,4 +1,5 @@
 import jax.numpy as jnp
+import jax.tree as jtr
 from flax import nnx
 
 def pc_error(vs, vs_ff):
@@ -7,14 +8,21 @@ def pc_error(vs, vs_ff):
 
     return total_energy
 
-def pc_step(model, x, tau = 1, rclamp = None):
+def pc_step(model: nnx.Module, x, tau = 1, rclamp = None):
     def _compute_pc_error(model, x, rclamp):
         _ = model(x, rclamp)
 
         return pc_error(model.activations, model.activations_ff)
 
-    total_energy, grads = nnx.value_and_grad(_compute_pc_error)(model, x, rclamp)
-    for i, (a, g) in enumerate(zip(model.activations, grads.activations.values())):
-        model.activations[i].value = a.value - g.value / tau
+    # compute local gradients w.r.t. current activations
+    acts_only = nnx.PathContains("activations")
+    # nnx.DiffState(...) means w.r.t. 0-th argument and only the leaves of the tree
+    # that match the acts_only filter
+    grad_fn = nnx.value_and_grad(_compute_pc_error, argnums=nnx.DiffState(0, acts_only))
+    total_energy, grads = grad_fn(model, x, rclamp)
+    # update only current activations
+    _, acts_state, other_state = nnx.split(model, acts_only, ...)
+    new_acts = jtr.map(lambda v, dv: v - dv / tau, acts_state, grads)
+    nnx.update(model, new_acts, other_state)
 
     return total_energy
