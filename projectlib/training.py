@@ -1,3 +1,4 @@
+import jax
 import jax.numpy as jnp
 import jax.tree as jtr
 from flax import nnx
@@ -35,5 +36,47 @@ def pc_step(model: nnx.Module, x, tau = 1, eta = 1, rclamp = None, inference = F
         other_state = jtr.map(lambda w, dw: w - eta * dw, other_state["layers"], grads["layers"])
         other_state = {"layers": other_state}
     nnx.update(model, {"activations": new_acts}, other_state)
+
+    return total_energy
+
+def current_pc_vjp(model: nnx.Module, x):
+    # get inputs for each layer
+    vs = (x, *(v.value for v in model.activations[:-1]))
+    # trick to call forward pass of split model = graph + state
+    def call(v, graph, state):
+        layer = nnx.merge(graph, state)
+        return layer(v)
+    # run forward direction for each layer, storing the VJPs w.r.t. input
+    vjps = [jax.vjp(lambda _v: call(_v, *nnx.split(layer)), v)[1]
+            for v, layer in zip(vs, model.layers)]
+
+    return vjps
+
+def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, rclamp = None):
+    # evaluate bottom up activations
+    _ = model(x)
+    total_energy = pc_error(model.activations, model.activations_ff)
+    # compute error signal
+    # note that r_final = identity(model.activations_ff[-1])
+    final_error = rclamp - model.activations_ff[-1]
+    # compute update for last layer (normal proportional control)
+    dvs = [k * (rclamp - model.activations[-1].value) / tau]
+    # apply error propagation with VJPs starting from next to last layer
+    # and working to the front of the network
+    error = final_error
+    for v, v_ff, vjp in zip(reversed(model.activations[:-1]),
+                            reversed(model.activations_ff[:-1]),
+                            reversed(vjps[1:])):
+        # propagate error backwards
+        # (i.e. running prod_l J^l e^L)
+        error = vjp(error)[0]
+        # compute proportional control signal
+        u = k * error
+        # compute dynamics update for activations
+        dv = (-v + v_ff + u) / tau
+        dvs.append(dv)
+    # apply dynamics
+    for v, dv in zip(model.activations, reversed(dvs)):
+        v.value = v.value + dv
 
     return total_energy

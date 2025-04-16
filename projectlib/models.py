@@ -4,7 +4,7 @@ from typing import Sequence, Callable
 
 class MLP(nnx.Module):
     def __init__(self, features: Sequence[int], *, rngs, activation_fn: Callable = nnx.tanh):
-        self.layers = [nnx.Linear(fin, fout, rngs=rngs)
+        self.layers = [nnx.Linear(fin, fout, use_bias=False, rngs=rngs)
                        for fin, fout in zip(features[:-1], features[1:])]
         # initialize the neuron activations (pre-nonlinearity)
         self.activations = [nnx.Param(jrng.normal(rngs.params(), (fout,)))
@@ -25,4 +25,4 @@ class MLP(nnx.Module):
                  init_fn=(lambda: []),
                  reduce_fn=(lambda _, new: new))
 
-        return vs[-1]
+        return vs[-1] # activated with identity function
