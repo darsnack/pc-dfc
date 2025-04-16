@@ -2,12 +2,15 @@ import jax.random as jrng
 from flax import nnx
 from typing import Sequence, Callable
 
+class Activation(nnx.Param):
+    pass
+
 class MLP(nnx.Module):
     def __init__(self, features: Sequence[int], *, rngs, activation_fn: Callable = nnx.tanh):
         self.layers = [nnx.Linear(fin, fout, use_bias=False, rngs=rngs)
                        for fin, fout in zip(features[:-1], features[1:])]
         # initialize the neuron activations (pre-nonlinearity)
-        self.activations = [nnx.Param(jrng.normal(rngs.params(), (fout,)))
+        self.activations = [Activation(jrng.normal(rngs.params(), (fout,)))
                             for fout in features[1:]]
         self.activation_fn = activation_fn
 
