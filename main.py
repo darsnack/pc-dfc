@@ -3,7 +3,6 @@ import jax.random as jrng
 import matplotlib.pyplot as plt
 import matplotlib.lines as mlines
 from flax import nnx
-from numpy import append
 
 from projectlib.models import MLP
 from projectlib.training import pc_step, current_pc_vjp, approx_pc_step
@@ -61,9 +60,11 @@ orig_activations = [model.activations[0].value.copy(),
 x = jrng.normal(rngs(), (20,))
 ntimesteps = 500
 rclamp = jnp.ones((2,)) * 0.3
+tau = 30
+eta = 1e-3
 
 errors, activations = run(model, pc_step, ntimesteps, x,
-                          tau=10, eta=1e-3, rclamp=rclamp)
+                          tau=tau, eta=1e-3, rclamp=rclamp)
 print("Final error (training) = ", errors[-1])
 fig, axs = plt.subplots(3, 3, figsize=(8, 8), layout="constrained")
 plot_dynamics(axs[0, :], errors, activations[1], activations[0])
@@ -71,7 +72,7 @@ plot_dynamics(axs[0, :], errors, activations[1], activations[0])
 model.activations[0].value = orig_activations[0]
 model.activations[1].value = orig_activations[1]
 errors, activations = run(model, pc_step, ntimesteps, x,
-                          tau=10, inference=True)
+                          tau=tau, inference=True)
 print("Final error (inference) = ", errors[-1])
 plot_dynamics(axs[1, :], errors, activations[1], activations[0])
 
@@ -81,7 +82,7 @@ fixed_pt_activations = [model.activations[0].value.copy(),
                         model.activations[1].value.copy()]
 
 errors, pcn_activations = run(model, pc_step, ntimesteps, x,
-                              tau=10, inference=True, rclamp=rclamp)
+                              tau=tau, inference=True, rclamp=rclamp)
 print("Final error (inference, true) = ", errors[-1])
 plot_dynamics(axs[2, :], errors, pcn_activations[1], pcn_activations[0])
 
@@ -89,7 +90,7 @@ vjps = current_pc_vjp(model, x)
 model.activations[0].value = fixed_pt_activations[0]
 model.activations[1].value = fixed_pt_activations[1]
 errors, dfc_activations = run(model, approx_pc_step, ntimesteps, x,
-                              vjps=vjps, tau=10, rclamp=rclamp)
+                              vjps=vjps, tau=tau, rclamp=rclamp)
 print("Final error (inference, approx) = ", errors[-1])
 plot_dynamics(axs[2, :], errors, dfc_activations[1], dfc_activations[0], linestyle="--")
 
@@ -100,29 +101,45 @@ plt.figlegend(handles=[true_line, approx_line],
               loc="outside lower center")
 plt.show()
 
-perturb_sizes = jnp.linspace(0.05, 5, 10)
+perturb_sizes = jnp.logspace(-1, 1, 20)
 perturb = jrng.normal(rngs(), model.activations[-1].shape)
 fig, axs = plt.subplots(nrows=4, ncols=3)
-cmap = plt.get_cmap("Blues")
-colors = [cmap(i) for i in jnp.linspace(0, 1, len(perturb_sizes))]
+fig2, axs2 = plt.subplots(nrows=4, ncols=3)
+fig3, axs3 = plt.subplots(nrows=1, ncols=2)
+cmap = plt.get_cmap("copper")
+colors = [cmap(i) for i in jnp.linspace(0.1, 1, len(perturb_sizes))]
 for i, perturb_size in enumerate(perturb_sizes):
     rclamp = fixed_pt_activations[-1] + perturb_size * perturb
 
     model.activations[0].value = fixed_pt_activations[0]
     model.activations[1].value = fixed_pt_activations[1]
     pcn_errors, pcn_activations = run(model, pc_step, ntimesteps, x,
-                                      tau=10, inference=True, rclamp=rclamp)
+                                      tau=tau, inference=True, rclamp=rclamp)
     print(f"Final error (inference, true, {perturb_size=}) = ", pcn_errors[-1])
 
     model.activations[0].value = fixed_pt_activations[0]
     model.activations[1].value = fixed_pt_activations[1]
     dfc_errors, dfc_activations = run(model, approx_pc_step, ntimesteps, x,
-                                      vjps=vjps, tau=10, rclamp=rclamp)
+                                      vjps=vjps, tau=tau, rclamp=rclamp)
     print(f"Final error (inference, approx, {perturb_size=}) = ", dfc_errors[-1])
 
-    act_diffs = [pcn - dfc for pcn, dfc in zip(pcn_activations, dfc_activations)]
+    act_diffs = [pcn[-1] - dfc
+                 for pcn, dfc in zip(pcn_activations, dfc_activations)]
 
     for j in range(act_diffs[0].shape[-1]):
         axs.flat[j].plot(act_diffs[0][:, j], color=colors[i])
+        axs2.flat[j].scatter(perturb_size, act_diffs[0][-1, j], color=colors[i])
+    axs.flat[-2].plot(act_diffs[1][:, 0], color=colors[i])
+    axs2.flat[-2].scatter(perturb_size, act_diffs[1][-1, 0], color=colors[i])
+    axs.flat[-1].plot(act_diffs[1][:, 1], color=colors[i])
+    axs2.flat[-1].scatter(perturb_size, act_diffs[1][-1, 1], color=colors[i])
+
+    axs3[0].scatter(perturb_size, jnp.mean(jnp.abs(act_diffs[0][-1])), color=colors[i])
+    axs3[1].scatter(perturb_size, jnp.mean(jnp.abs(act_diffs[1][-1])), color=colors[i])
+
+for ax2 in axs2.flat:
+    ax2.set_xscale("log")
+axs3[0].set_xscale("log")
+axs3[1].set_xscale("log")
 
 plt.show()
