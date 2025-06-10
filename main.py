@@ -6,6 +6,7 @@ from flax import nnx
 
 from projectlib.models import MLP
 from projectlib.training import pc_step, current_pc_vjp, approx_pc_step
+from projectlib.utils import noop
 
 # plotting helper function
 def plot_dynamics(axs, errors, out_acts, hidden_acts, **kwargs):
@@ -37,7 +38,8 @@ def run(model, step_fn, ntimesteps, *args, **kwargs):
 rngs = nnx.Rngs(0, params=1, train=2)
 
 # build model
-model = MLP([20, 10, 8, 6, 4, 2], rngs=rngs)
+# model = MLP([20, 10, 8, 6, 4, 2], rngs=rngs)
+model = MLP([20, 10, 2], activation_fn=noop, rngs=rngs)
 print(model)
 y = model(jnp.ones((20,)))
 print(y.shape)
