@@ -53,7 +53,7 @@ def current_pc_vjp(model: nnx.Module, x):
 
 def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, rclamp = None):
     # evaluate bottom up activations
-    _ = model(x)
+    _ = model(x, rclamp)
     total_energy = pc_error(model.activations, model.activations_ff)
     # compute error signal
     # note that r_final = identity(model.activations_ff[-1])
