@@ -51,7 +51,7 @@ def current_pc_vjp(model: nnx.Module, x):
 
     return vjps
 
-def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, rclamp = None):
+def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, eta = 1, rclamp = None, inference = True):
     # evaluate bottom up activations
     _ = model(x, rclamp)
     total_energy = pc_error(model.activations, model.activations_ff)
@@ -60,6 +60,7 @@ def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, rclamp = None):
     final_error = rclamp - model.activations_ff[-1]
     # compute update for last layer (normal proportional control)
     dvs = [k * (rclamp - model.activations[-1].value) / tau]
+    dws = []
     # apply error propagation with VJPs starting from next to last layer
     # and working to the front of the network
     error = final_error
@@ -74,8 +75,16 @@ def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, rclamp = None):
         # compute dynamics update for activations
         dv = (-v + v_ff + u) / tau
         dvs.append(dv)
+
+        dw = eta * error @ model.activation_fn(v).T
+        dws.append(dw)
+
     # apply dynamics
     for v, dv in zip(model.activations, reversed(dvs)):
         v.value = v.value + dv
+
+    if not inference:
+        for w, dw in zip(model.layers, reversed(dws)):
+            w.value = w.value + dw
 
     return total_energy

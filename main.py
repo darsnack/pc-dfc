@@ -82,7 +82,7 @@ rclamp = model.activations[-1].value + perturb
 fixed_pt_activations = [act.value.copy() for act in model.activations]
 
 errors, pcn_activations = run(model, pc_step, ntimesteps, x,
-                              tau=tau, inference=True, rclamp=rclamp)
+                              tau=tau, inference=False, rclamp=rclamp)
 print("Final error (inference, true) = ", errors[-1])
 plot_dynamics(axs[2, :], errors, pcn_activations[-1], pcn_activations[0])
 
@@ -90,7 +90,7 @@ vjps = current_pc_vjp(model, x)
 for i, act in enumerate(fixed_pt_activations):
     model.activations[i].value = act
 errors, dfc_activations = run(model, approx_pc_step, ntimesteps, x,
-                              vjps=vjps, tau=tau, rclamp=rclamp)
+                              vjps=vjps, tau=tau, inference=False, rclamp=rclamp)
 print("Final error (inference, approx) = ", errors[-1])
 plot_dynamics(axs[2, :], errors, dfc_activations[-1], dfc_activations[0], linestyle="--")
 
