@@ -39,7 +39,7 @@ rngs = nnx.Rngs(0, params=1, train=2)
 
 # build model
 # model = MLP([20, 10, 8, 6, 4, 2], rngs=rngs)
-model = MLP([20, 10, 2], activation_fn=noop, rngs=rngs)
+model = MLP([20, 10, 8, 2], activation_fn=noop, rngs=rngs)
 print(model)
 y = model(jnp.ones((20,)))
 print(y.shape)
@@ -86,6 +86,10 @@ fixed_pt_activations = [act.value.copy() for act in model.activations]
 errors, pcn_activations = run(model, pc_step, ntimesteps, x,
                               tau=tau, eta=eta, inference=False, rclamp=rclamp)
 print("Final error (training w/ perturb, pcn) = ", errors[-1])
+for i, act in enumerate(fixed_pt_activations):
+    model.activations[i].value = act
+errors, pcn_activations = run(model, pc_step, ntimesteps, x,
+                              tau=tau, eta=eta, inference=True)
 plot_dynamics(axs[2, :], errors, pcn_activations[-1], pcn_activations[0])
 
 model = nnx.clone(fixed_pt_model)
@@ -94,6 +98,10 @@ errors, dfc_activations = run(model, approx_pc_step, ntimesteps, x,
                               vjps=vjps, tau=tau, eta=eta, inference=False, rclamp=rclamp)
 print("Starting error (training w/ perturb, approx pcn) = ", errors[0])
 print("Final error (training w/ perturb, approx pcn) = ", errors[-1])
+for i, act in enumerate(fixed_pt_activations):
+    model.activations[i].value = act
+errors, pcn_activations = run(model, approx_pc_step, ntimesteps, x,
+                              vjps=vjps, tau=tau, eta=eta, inference=True, rclamp=rclamp)
 plot_dynamics(axs[2, :], errors, dfc_activations[-1], dfc_activations[0], linestyle="--")
 
 true_line = mlines.Line2D([], [], color="black", linestyle="-", label="true")
@@ -123,11 +131,19 @@ for p, perturb_size in enumerate(perturb_sizes):
     pcn_errors, pcn_activations = run(model, pc_step, ntimesteps, x,
                                       tau=tau, eta=eta, inference=False, rclamp=rclamp)
     print(f"Final error (training, pcn, {perturb_size=}) = ", pcn_errors[-1])
+    for i, act in enumerate(fixed_pt_activations):
+        model.activations[i].value = act
+    pcn_errors, pcn_activations = run(model, pc_step, ntimesteps, x,
+                                      tau=tau, eta=eta, inference=True)
 
     model = nnx.clone(fixed_pt_model)
     dfc_errors, dfc_activations = run(model, approx_pc_step, ntimesteps, x,
                                       vjps=vjps, tau=tau, eta=eta, inference=False, rclamp=rclamp)
     print(f"Final error (training, approx pcn, {perturb_size=}) = ", dfc_errors[-1])
+    for i, act in enumerate(fixed_pt_activations):
+        model.activations[i].value = act
+    dfc_errors, dfc_activations = run(model, approx_pc_step, ntimesteps, x,
+                                      vjps=vjps, tau=tau, eta=eta, inference=True, rclamp=rclamp)
 
     act_diffs = [pcn[-1] - dfc
                  for pcn, dfc in zip(pcn_activations, dfc_activations)]
