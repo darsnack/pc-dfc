@@ -65,7 +65,7 @@ tau = 30
 eta = 1e-3
 
 errors, activations = run(model, pc_step, ntimesteps, x,
-                          tau=tau, eta=1e-3, rclamp=rclamp)
+                          tau=tau, eta=eta, rclamp=rclamp)
 print("Final error (training) = ", errors[-1])
 fig, axs = plt.subplots(3, 3, figsize=(8, 8), layout="constrained")
 plot_dynamics(axs[0, :], errors, activations[-1], activations[0])
@@ -79,19 +79,21 @@ plot_dynamics(axs[1, :], errors, activations[-1], activations[0])
 
 perturb = 0.1 * jrng.normal(rngs(), model.activations[-1].shape)
 rclamp = model.activations[-1].value + perturb
+w_orig = model.layers[1].kernel.value.copy()
+fixed_pt_model = nnx.clone(model)
 fixed_pt_activations = [act.value.copy() for act in model.activations]
 
 errors, pcn_activations = run(model, pc_step, ntimesteps, x,
-                              tau=tau, inference=False, rclamp=rclamp)
-print("Final error (inference, true) = ", errors[-1])
+                              tau=tau, eta=eta, inference=False, rclamp=rclamp)
+print("Final error (training w/ perturb, pcn) = ", errors[-1])
 plot_dynamics(axs[2, :], errors, pcn_activations[-1], pcn_activations[0])
 
+model = nnx.clone(fixed_pt_model)
 vjps = current_pc_vjp(model, x)
-for i, act in enumerate(fixed_pt_activations):
-    model.activations[i].value = act
 errors, dfc_activations = run(model, approx_pc_step, ntimesteps, x,
-                              vjps=vjps, tau=tau, inference=False, rclamp=rclamp)
-print("Final error (inference, approx) = ", errors[-1])
+                              vjps=vjps, tau=tau, eta=eta, inference=False, rclamp=rclamp)
+print("Starting error (training w/ perturb, approx pcn) = ", errors[0])
+print("Final error (training w/ perturb, approx pcn) = ", errors[-1])
 plot_dynamics(axs[2, :], errors, dfc_activations[-1], dfc_activations[0], linestyle="--")
 
 true_line = mlines.Line2D([], [], color="black", linestyle="-", label="true")
@@ -117,17 +119,15 @@ layer_colors = [cmap(i) for i in jnp.linspace(0.1, 1, len(fixed_pt_activations))
 for p, perturb_size in enumerate(perturb_sizes):
     rclamp = fixed_pt_activations[-1] + perturb_size * perturb
 
-    for i, act in enumerate(fixed_pt_activations):
-        model.activations[i].value = act
+    model = nnx.clone(fixed_pt_model)
     pcn_errors, pcn_activations = run(model, pc_step, ntimesteps, x,
-                                      tau=tau, inference=True, rclamp=rclamp)
-    print(f"Final error (inference, true, {perturb_size=}) = ", pcn_errors[-1])
+                                      tau=tau, eta=eta, inference=False, rclamp=rclamp)
+    print(f"Final error (training, pcn, {perturb_size=}) = ", pcn_errors[-1])
 
-    for i, act in enumerate(fixed_pt_activations):
-        model.activations[i].value = act
+    model = nnx.clone(fixed_pt_model)
     dfc_errors, dfc_activations = run(model, approx_pc_step, ntimesteps, x,
-                                      vjps=vjps, tau=tau, rclamp=rclamp)
-    print(f"Final error (inference, approx, {perturb_size=}) = ", dfc_errors[-1])
+                                      vjps=vjps, tau=tau, eta=eta, inference=False, rclamp=rclamp)
+    print(f"Final error (training, approx pcn, {perturb_size=}) = ", dfc_errors[-1])
 
     act_diffs = [pcn[-1] - dfc
                  for pcn, dfc in zip(pcn_activations, dfc_activations)]

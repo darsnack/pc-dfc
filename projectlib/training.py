@@ -67,6 +67,9 @@ def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, eta = 1, rclamp =
     for v, v_ff, vjp in zip(reversed(model.activations[:-1]),
                             reversed(model.activations_ff[:-1]),
                             reversed(vjps[1:])):
+        # compute gradient w.r.t. weights
+        dw = eta *  model.activation_fn(v)[:, None] @ error[None, :]
+        dws.append(dw)
         # propagate error backwards
         # (i.e. running prod_l J^l e^L)
         error = vjp(error)[0]
@@ -75,16 +78,16 @@ def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, eta = 1, rclamp =
         # compute dynamics update for activations
         dv = (-v + v_ff + u) / tau
         dvs.append(dv)
-
-        dw = eta * error @ model.activation_fn(v).T
-        dws.append(dw)
+    # compute gradient update for first layer
+    dw = eta * x[:, None] @ error[None, :]
+    dws.append(dw)
 
     # apply dynamics
     for v, dv in zip(model.activations, reversed(dvs)):
         v.value = v.value + dv
 
     if not inference:
-        for w, dw in zip(model.layers, reversed(dws)):
-            w.value = w.value + dw
+        for layer, dw in zip(model.layers, reversed(dws)):
+            layer.kernel.value = layer.kernel.value + dw
 
     return total_energy
