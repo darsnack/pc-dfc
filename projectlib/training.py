@@ -11,14 +11,14 @@ def pc_error(vs, vs_ff):
 
     return total_energy
 
-def pc_step(model: nnx.Module, x, tau = 1, eta = 1, rclamp = None, inference = False):
+def pc_step(model: nnx.Module, x, tau = 1, eta = 1, rclamp = None, learn = False):
     def _compute_pc_error(model, x, rclamp):
         _ = model(x, rclamp)
 
         return pc_error(model.activations, model.activations_ff)
 
     acts_only = Activation
-    if inference:
+    if not learn:
         # compute local gradients w.r.t. current activations
         # nnx.DiffState(...) means w.r.t. 0-th argument and only the leaves of the tree
         # that match the acts_only filter
@@ -32,7 +32,7 @@ def pc_step(model: nnx.Module, x, tau = 1, eta = 1, rclamp = None, inference = F
     acts_state, other_state = nnx.state(model, acts_only, nnx.Param)
     acts_grads, other_grads = nnx.split_state(grads, acts_only, nnx.Param)
     new_acts = jtr.map(lambda v, dv: v - dv / tau, acts_state, acts_grads)
-    if not inference:
+    if learn:
         other_state = jtr.map(lambda w, dw: w - eta * dw, other_state, other_grads)
     nnx.update(model, new_acts, other_state)
 
@@ -51,15 +51,19 @@ def current_pc_vjp(model: nnx.Module, x):
 
     return vjps
 
-def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, eta = 1, rclamp = None, inference = True):
+def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, eta = 1, rclamp = None, learn = False):
     # evaluate bottom up activations
     _ = model(x, rclamp)
     total_energy = pc_error(model.activations, model.activations_ff)
     # compute error signal
     # note that r_final = identity(model.activations_ff[-1])
-    final_error = rclamp - model.activations_ff[-1]
+    final_error = model.activations[-1] - model.activations_ff[-1]
     # compute update for last layer (normal proportional control)
-    dvs = [k * (rclamp - model.activations[-1].value) / tau]
+    # if rclamp is set, we do not update the last layer
+    if rclamp is None:
+        dvs = [(-model.activations[-1] + model.activations_ff[-1]) / tau]
+    else:
+        dvs = [0]
     dws = []
     # apply error propagation with VJPs starting from next to last layer
     # and working to the front of the network
@@ -86,7 +90,7 @@ def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, eta = 1, rclamp =
     for v, dv in zip(model.activations, reversed(dvs)):
         v.value = v.value + dv
 
-    if not inference:
+    if learn:
         for layer, dw in zip(model.layers, reversed(dws)):
             layer.kernel.value = layer.kernel.value + dw
 
