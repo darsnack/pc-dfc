@@ -76,10 +76,13 @@ nudge_eps = 1e-5
 nudge_factor = 10
 
 # Synthetic dataset
-X = jrng.normal(rngs.data(), (100, 2)) * 1e-1
 wtrue = jrng.normal(rngs.data(), (2, 1))
+X = jrng.normal(rngs.data(), (10, 2)) * 1e-1
 y = X @ wtrue
-dataset = [(x_i, y_i) for x_i, y_i in zip(X, y)]
+dataset_trn = [(x_i, y_i) for x_i, y_i in zip(X, y)]
+X = jrng.normal(rngs.data(), (5, 2)) * 1e-1
+y = X @ wtrue
+dataset_tst = [(x_i, y_i) for x_i, y_i in zip(X, y)]
 
 # Initialize wandb
 wandb.init(
@@ -91,7 +94,8 @@ wandb.init(
         "learning_rate": lr,
         "nudge_eps": nudge_eps,
         "nudge_factor": nudge_factor,
-        "dataset_size": len(dataset)
+        "dataset_trn_size": len(dataset_trn),
+        "dataset_tst_size": len(dataset_tst),
     }
 )
 
@@ -102,7 +106,7 @@ wandb.init(
 
 # Converge to fixed point initially on first example
 print("Initial convergence to fixed point:")
-errors, activations, init_steps = run(model, pc_step, dataset[0][0],
+errors, activations, init_steps = run(model, pc_step, dataset_trn[0][0],
                                       tau=tau, eta=lr, learn=False)
 print(f"Initial convergence took {init_steps} timesteps")
 # Log initial convergence to wandb
@@ -111,7 +115,7 @@ wandb.log({"initial_convergence_timesteps": init_steps})
 
 # Store fixed point of last layer
 v_fp = activations[-1][-1]
-vjps = current_pc_vjp(model, dataset[0][0])
+vjps = current_pc_vjp(model, dataset_trn[0][0])
 
 # Main training loop
 print("\nTraining:")
@@ -120,7 +124,7 @@ with tqdm(range(num_epochs), desc="epochs", position=0, leave=True) as epoch_bar
         epoch_nudge_counts = []
         epoch_timestep_counts = []
         epoch_errors = []
-        with tqdm(enumerate(dataset), desc="samples", position=1, leave=False, total=len(dataset)) as sample_bar:
+        with tqdm(enumerate(dataset_trn), desc="trn samples", position=1, leave=False, total=len(dataset_trn)) as sample_bar:
             for sample_idx, (x, y) in sample_bar:
                 # Keep nudging toward current sample until convergence
                 nudge_count = 0
@@ -162,11 +166,11 @@ with tqdm(range(num_epochs), desc="epochs", position=0, leave=True) as epoch_bar
                     # Log each nudge step to wandb
                     wandb.log({
                         "epoch": epoch,
-                        "sample": sample_idx,
-                        "nudge": nudge_count,
-                        "timesteps_per_nudge": timesteps,
-                        "error": error_val,
-                        "weight_change_norm": float(param_change_norm)
+                        "train/sample": sample_idx,
+                        "train/nudge": nudge_count,
+                        "train/timesteps_per_nudge": timesteps,
+                        "train/error": error_val,
+                        "train/weight_change_norm": float(param_change_norm)
                     }, commit=(error_val > nudge_eps))
 
                 # Log summary metrics for this sample
@@ -177,11 +181,51 @@ with tqdm(range(num_epochs), desc="epochs", position=0, leave=True) as epoch_bar
                  # Log sample-level metrics to wandb
                 wandb.log({
                     "epoch": epoch,
-                    "sample": sample_idx,
-                    "total_nudges_per_sample": nudge_count,
-                    "total_timesteps_per_sample": total_timesteps,
-                    "final_error": float(jnp.linalg.norm(v_fp - y))
-                }, commit=(sample_idx < len(dataset) - 1))
+                    "train/sample": sample_idx,
+                    "train/total_nudges_per_sample": nudge_count,
+                    "train/total_timesteps_per_sample": total_timesteps,
+                    "train/final_error": float(jnp.linalg.norm(v_fp - y))
+                }, commit=(sample_idx < len(dataset_trn) - 1))
+
+        with tqdm(enumerate(dataset_tst), desc="tst samples", position=2, leave=False, total=len(dataset_tst)) as sample_bar:
+            for sample_idx, (x, y) in sample_bar:
+                # Run dynamics until convergence
+                errors, activations, timesteps = run(model, approx_pc_step, x,
+                                                     disable_tqdm=True,
+                                                     vjps=vjps,
+                                                     tau=tau,
+                                                     eta=lr,
+                                                     learn=False)
+                # Update fixed point
+                v_fp = activations[-1][-1]
+                vjps = current_pc_vjp(model, x)
+
+                # Record nudge statistics
+                error_val = float(jnp.linalg.norm(v_fp - y))
+
+                # Update progress bar with current nudge info
+                sample_bar.set_postfix({
+                    "timesteps": timesteps,
+                    "error": f"{error_val:.6f}"
+                })
+
+                # # Log each nudge step to wandb
+                # wandb.log({
+                #     "epoch": epoch,
+                #     "train/sample": sample_idx,
+                #     "train/nudge": nudge_count,
+                #     "train/timesteps_per_nudge": timesteps,
+                #     "train/error": error_val,
+                #     "train/weight_change_norm": float(param_change_norm)
+                # }, commit=(error_val > nudge_eps))
+
+                # Log sample-level metrics to wandb
+                wandb.log({
+                    "epoch": epoch,
+                    "test/sample": sample_idx,
+                    "test/total_timesteps_per_sample": timesteps,
+                    "test/final_error": error_val
+                }, commit=(sample_idx < len(dataset_tst) - 1))
 
         # Log epoch-level summary statistics
         wandb.log({
