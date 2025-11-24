@@ -29,7 +29,7 @@ class MLP(nnx.Module):
                  reduce_fn=(lambda _, new: new))
 
         return vs[-1] # activated with identity function
-    
+
     def set_activations(self, activations):
         for i, act in enumerate(activations):
             self.activations[i].value = act

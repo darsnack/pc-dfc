@@ -1,81 +1,40 @@
+import hydra
 import wandb
 import jax.numpy as jnp
 import jax.random as jrng
 import jax.tree as jtu
 from flax import nnx
 from tqdm.auto import tqdm
+from omegaconf import OmegaConf
 
 from projectlib.models import MLP, Activation
 from projectlib.dynamics import pc_step, current_pc_vjp, approx_pc_step, run
+from projectlib.data import load_dataset, build_dataloader
 from projectlib.utils import noop, get_model_params, compute_param_change_norm
 
-
-# Initialize random number generator
-rngs = nnx.Rngs(0, params=1, train=2, data=3)
-
-# Build model
-layer_dims = [2, 2, 2, 1]
-model = MLP(layer_dims, activation_fn=noop, rngs=rngs)
-
-# Training parameters
-num_epochs = 10
-tau = 30
-lr = 1e-3
-nudge_eps = 1e-5
-nudge_factor = 10
-
-# Synthetic dataset
-wtrue = jrng.normal(rngs.data(), (2, 1))
-X = jrng.normal(rngs.data(), (10, 2)) * 1e-1
-y = X @ wtrue
-dataset_trn = [(x_i, y_i) for x_i, y_i in zip(X, y)]
-X = jrng.normal(rngs.data(), (5, 2)) * 1e-1
-y = X @ wtrue
-dataset_tst = [(x_i, y_i) for x_i, y_i in zip(X, y)]
-
-# Initialize wandb
-wandb.init(
-    project="pc-dfc",  # Project name
-    config={
-        "model_layers": layer_dims,
-        "epochs": num_epochs,
-        "tau": tau,
-        "learning_rate": lr,
-        "nudge_eps": nudge_eps,
-        "nudge_factor": nudge_factor,
-        "dataset_trn_size": len(dataset_trn),
-        "dataset_tst_size": len(dataset_tst),
-    }
-)
-
-# TODO: do we need to store v_fp separately?
-#       (see pseudo-code uses model.activations[-1] directly)
-
-
-
-
-
-
-def runs_with_nudges(x, y, model, v_fp, vjps, epoch, sample_idx):
+def runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, sample_idx):
     # Keep nudging toward current sample until convergence
     nudge_count = 0
     total_timesteps = 0
-    while jnp.linalg.norm(v_fp - y) > nudge_eps:
+    while jnp.linalg.norm(v_fp[-1] - y) > cfg.nudge.convergence_tolerance:
+        if nudge_count > cfg.nudge.max_count:
+            print("Nudge count exceeded maximum")
+            break
         # Store parameters before the nudge
         pre_nudge_params = get_model_params(model)
         nudge_count += 1
         # Compute nudge in direction of target/label
-        rclamp = v_fp + (y - v_fp) / nudge_factor
+        rclamp = v_fp[-1] + (y - v_fp[-1]) * cfg.nudge.scaling_factor
         # Run dynamics until convergence
-        errors, activations, timesteps = run(model, approx_pc_step, x,
-                                                disable_tqdm=True,
-                                                vjps=vjps,
-                                                tau=tau,
-                                                eta=lr,
-                                                learn=True,
-                                                rclamp=rclamp)
+        _, activations, timesteps = run(model, approx_pc_step, x,
+                                        disable_tqdm=True,
+                                        vjps=vjps,
+                                        tau=cfg.time_constant,
+                                        eta=cfg.training.learning_rate,
+                                        learn=True,
+                                        rclamp=rclamp)
         # Update fixed point
-        v_fp = activations[-1][-1]
+        v_fp = activations
         vjps = current_pc_vjp(model, x)
 
         # Store parameters after the nudge
@@ -84,7 +43,7 @@ def runs_with_nudges(x, y, model, v_fp, vjps, epoch, sample_idx):
         param_change_norm = compute_param_change_norm(pre_nudge_params, post_nudge_params)
 
         # Record nudge statistics
-        error_val = float(jnp.linalg.norm(v_fp - y))
+        error_val = float(jnp.linalg.norm(v_fp[-1] - y))
         total_timesteps += timesteps
 
         # Log each nudge step to wandb
@@ -95,37 +54,35 @@ def runs_with_nudges(x, y, model, v_fp, vjps, epoch, sample_idx):
             "train/timesteps_per_nudge": timesteps,
             "train/error": error_val,
             "train/weight_change_norm": float(param_change_norm)
-        }, commit=(error_val > nudge_eps))
+        }, commit=(error_val > cfg.nudge.convergence_tolerance))
 
     return nudge_count, total_timesteps, v_fp, vjps
 
-
-
-def train_epoch(config, model, dataset_trn, epoch):
-
-    # Converge to fixed point initially on first example
-    print("Initial convergence to fixed point:")
-    errors, activations, init_steps = run(model, pc_step, dataset_trn[0][0],
-                                        tau=tau, eta=lr, learn=False)
+def initialize_to_fp(cfg, model, sample):
+    _, activations, init_steps = run(model, pc_step, sample,
+                                     disable_tqdm=True, tau=cfg.time_constant, learn=False)
     print(f"Initial convergence took {init_steps} timesteps")
     # Log initial convergence to wandb
     wandb.log({"initial_convergence_timesteps": init_steps})
-
     # Store fixed point of last layer
-    v_fp = activations[-1][-1]
-    vjps = current_pc_vjp(model, dataset_trn[0][0])
+    init_v_fp = activations
+    init_vjps = current_pc_vjp(model, sample)
 
+    return init_v_fp, init_vjps
+
+def train_epoch(cfg, model, v_fp, vjps, dataset_trn, epoch):
     epoch_nudge_counts = []
     epoch_timestep_counts = []
     epoch_errors = []
 
     for sample_idx, (x, y) in enumerate(dataset_trn):
-        nudge_count, total_timesteps, v_fp, vjps = runs_with_nudges(x, y, model, v_fp, vjps, epoch, sample_idx)
+        x, y = jnp.array(x[0]), jnp.array(y[0])
+        nudge_count, total_timesteps, v_fp, vjps = runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, sample_idx)
 
         # Log summary metrics for this sample
         epoch_nudge_counts.append(nudge_count)
         epoch_timestep_counts.append(total_timesteps)
-        epoch_errors.append(float(jnp.linalg.norm(v_fp - y)))
+        epoch_errors.append(float(jnp.linalg.norm(v_fp[-1] - y)))
 
         # Log sample-level metrics to wandb
         wandb.log({
@@ -133,35 +90,29 @@ def train_epoch(config, model, dataset_trn, epoch):
             "train/sample": sample_idx,
             "train/total_nudges_per_sample": nudge_count,
             "train/total_timesteps_per_sample": total_timesteps,
-            "train/final_error": float(jnp.linalg.norm(v_fp - y))
+            "train/final_error": epoch_errors[-1]
         }, commit=(sample_idx < len(dataset_trn) - 1))
 
+    wandb.log({"epoch": epoch, "train/epoch_error": jnp.mean(jnp.array(epoch_errors))})
 
-def test_epoch(config, model, dataset_test, epoch):
+def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch):
+    epoch_errors = []
+    for sample_idx, (x, y) in enumerate(dataset_tst):
+        x, y = jnp.array(x[0]), jnp.array(y[0])
+        # Set activation to fixed point
+        model.set_activations(v_fp)
 
-    # Update fixed point
-    # TODO change input from first data point to random vector or random data point or smth
-    errors, activations, init_steps = run(model, pc_step, dataset_tst[0][0],
-                                        tau=tau, eta=lr, learn=False)
-    v_fp_init = activations[-1][-1]
-    vjps = current_pc_vjp(model, dataset_tst[0][0])
-
-    for sample_idx, (x, y) in enumerate(dataset_test):
-
-        model.set_activations(v_fp_init)
-        
         # Run dynamics until convergence
-        errors, activations, timesteps = run(model, approx_pc_step, x,
-                                            disable_tqdm=True,
-                                            vjps=vjps,
-                                            tau=tau,
-                                            eta=lr,
-                                            learn=False)
-
+        _, activations, timesteps = run(model, approx_pc_step, x,
+                                        disable_tqdm=True,
+                                        vjps=vjps,
+                                        tau=cfg.time_constant,
+                                        learn=False)
 
         # Record nudge statistics
-        v_fp = activations[-1][-1]
-        error_val = float(jnp.linalg.norm(v_fp - y))
+        v_fp = activations
+        error_val = float(jnp.linalg.norm(v_fp[-1] - y))
+        epoch_errors.append(error_val)
 
         # Log sample-level metrics to wandb
         wandb.log({
@@ -171,11 +122,40 @@ def test_epoch(config, model, dataset_test, epoch):
             "test/final_error": error_val
         }, commit=(sample_idx < len(dataset_tst) - 1))
 
+    wandb.log({"epoch": epoch, "test/epoch_error": jnp.mean(jnp.array(epoch_errors))})
 
-def main(config, model, dataset_trn, dataset_test):
-    for epoch in range(config["num_epochs"]):
-        train_epoch(config, model, dataset_trn, epoch)
-        test_epoch(config, model, dataset_test, epoch)
+@hydra.main(config_path="./configs", config_name="main", version_base=None)
+def main(cfg):
+    # Initialize random number generator
+    rngs = nnx.Rngs(cfg.seed, params=cfg.seed + 1, train=cfg.seed + 2, data=cfg.seed + 3)
+
+    # Build model
+    if cfg.model.activation_fn == "noop":
+        activation_fn = noop
+    elif cfg.model.activation_fn == "tanh":
+        activation_fn = nnx.tanh
+    else:
+        raise ValueError(f"Unknown activation fn: {cfg.model.activation_fn}")
+    model = MLP(cfg.model.layer_dims, activation_fn=activation_fn, rngs=rngs)
+
+    # Load datasets
+    data = load_dataset(cfg.data, rngs.data())
+    input_shape = data["test"][0][0].shape
+    trn_loader = build_dataloader(data["train"], batch_size=cfg.training.batch_size)
+    tst_loader = build_dataloader(data["test"], batch_size=cfg.training.batch_size)
+
+    # Initialize wandb
+    wandb.init(entity="mitra-ryan-kyle", project="pc-dfc", config=OmegaConf.to_container(cfg))
+
+    for epoch in range(cfg.training.epochs):
+        # Initialize to a fixed point using random Gaussian input
+        # (think about this deeper later)
+        fp_input = jrng.normal(rngs.train(), input_shape) * 1e-1
+        init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
+        train_epoch(cfg, model, init_v_fp, init_vjps, trn_loader, epoch)
+        fp_input = jrng.normal(rngs.train(), input_shape) * 1e-1
+        init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
+        test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, epoch)
 
     # # Log epoch-level summary statistics
     # wandb.log({

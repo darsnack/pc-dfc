@@ -1,0 +1,6 @@
+name: gaussian
+input_dim: 2
+input_stddev: 1e-1
+output_dim: 1
+train_size: 10
+test_size: 5

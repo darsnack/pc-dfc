@@ -98,7 +98,8 @@ def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, eta = 1, rclamp =
     return total_energy
 
 
-def run(model, step_fn, x, max_timesteps = 5000, tolerance = 1e-5, disable_tqdm=False, **kwargs):
+def run(model, step_fn, x,
+        max_timesteps = 5000, tolerance = 1e-5, disable_tqdm = False, return_act_history = False, **kwargs):
     """Run the model for a specified number of timesteps or until convergence."""
     errors = []
     # Store initial activations
@@ -117,7 +118,10 @@ def run(model, step_fn, x, max_timesteps = 5000, tolerance = 1e-5, disable_tqdm=
             bar.update(1)
 
     errors = jnp.stack(errors)
-    activations = [jnp.stack(acts) for acts in activations]
+    if return_act_history:
+        activations = [jnp.stack(acts) for acts in activations]
+    else:
+        activations = [acts[-1] for acts in activations]
 
     return errors, activations, t
 
@@ -129,4 +133,3 @@ def is_converged(activations, tolerance):
     else:
         dvs = jnp.array([jnp.linalg.norm(act[-1] - act[-2]) ** 2 for act in activations])
         return jnp.sqrt(jnp.sum(dvs)) < tolerance
-    
