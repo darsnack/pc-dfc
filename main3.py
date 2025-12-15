@@ -2,14 +2,12 @@ import hydra
 import wandb
 import jax.numpy as jnp
 import jax.random as jrng
-import jax.tree as jtu
 from flax import nnx
-from tqdm.auto import tqdm
 from omegaconf import OmegaConf
 
-from projectlib.models import MLP, Activation
+from projectlib.models import MLP
 from projectlib.dynamics import pc_step, current_pc_vjp, approx_pc_step, run
-from projectlib.data import load_dataset, build_dataloader
+from projectlib.data import load_dataset, build_dataloader, default_data_transforms
 from projectlib.utils import noop, get_model_params, compute_param_change_norm
 
 def runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, sample_idx):
@@ -139,7 +137,8 @@ def main(cfg):
     model = MLP(cfg.model.layer_dims, activation_fn=activation_fn, rngs=rngs)
 
     # Load datasets
-    data = load_dataset(cfg.data, rngs.data())
+    transforms = default_data_transforms(cfg.data)
+    data = load_dataset(cfg.data, rngs.data(), transforms)
     input_shape = data["test"][0][0].shape
     trn_loader = build_dataloader(data["train"], batch_size=cfg.training.batch_size)
     tst_loader = build_dataloader(data["test"], batch_size=cfg.training.batch_size)

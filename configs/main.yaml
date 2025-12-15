@@ -1,16 +1,23 @@
 defaults:
 - data: gaussian
+- _self_
+# - optional override /task-overrides: ${data}
 
 time_constant: 30 # membrane time constant (units of dt)
 nudge:
-  max_count: 100
-  convergence_tolerance: 1e-5
+  # max_count: 100
+  max_count: 500
+  # convergence_tolerance: 1e-5
+  convergence_tolerance: 1e-4
   scaling_factor: 0.1 # scale the nudge in the dir. of fixed pt.
+# model:
+#   layer_dims: [2, 2, 2, 1] # including input/output dims.
+#   activation_fn: noop # noop or tanh
 model:
-  layer_dims: [2, 2, 2, 1] # including input/output dims.
+  layer_dims: [784, 64, 32, 10] # including input/output dims.
   activation_fn: noop # noop or tanh
 seed: 0
 training:
-  epochs: 10
+  epochs: 50
   learning_rate: 1e-3
   batch_size: 1

@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import numpy as np
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision import datasets
+from torchvision.transforms import v2 as transforms
 
 def _to_tensor(x):
     if isinstance(x, jax.Array):
@@ -16,6 +17,13 @@ def _to_tensor(x):
         return torch.Tensor(x)
     else:
         return x
+
+class Flatten(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return x.reshape((-1,))
 
 class OneHot(torch.nn.Module):
     def __init__(self, num_classes):
@@ -33,7 +41,22 @@ class JaxImageOrder(torch.nn.Module):
         # CHW --> HWC
         return torch.permute(img, (1, 2, 0))
 
-def load_dataset(cfg, rng_key, transforms = None):
+def default_data_transforms(cfg):
+    if cfg.name == "mnist":
+        img_transforms = transforms.Compose(
+            [
+                transforms.ToImage(),
+                transforms.ToDtype(torch.float32, scale=True),
+                JaxImageOrder(),
+                Flatten(),
+            ]
+        )
+
+        return img_transforms, OneHot(10)
+    else:
+        return None, None
+
+def load_dataset(cfg, rng_key, transforms = (None, None)):
     if cfg.name == "mnist":
         return {
             "train": datasets.MNIST(

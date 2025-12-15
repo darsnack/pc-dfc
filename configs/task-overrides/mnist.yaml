@@ -1,0 +1,5 @@
+# @package _global_
+
+model:
+  layer_dims: [784, 64, 32, 10] # including input/output dims.
+  activation_fn: noop # noop or tanh

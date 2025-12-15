@@ -58,6 +58,7 @@ def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, eta = 1, rclamp =
     total_energy = pc_error(model.activations, model.activations_ff)
     # compute error signal
     # note that r_final = identity(model.activations_ff[-1])
+    # change this to reflect non-identity activation (e.g. softmax)
     final_error = model.activations[-1] - model.activations_ff[-1]
     # compute update for last layer (normal proportional control)
     # if rclamp is set, we do not update the last layer
