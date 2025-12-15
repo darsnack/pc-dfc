@@ -1,1 +1,3 @@
 name: mnist
+flatten: true
+normalize: true

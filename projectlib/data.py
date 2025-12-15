@@ -43,16 +43,15 @@ class JaxImageOrder(torch.nn.Module):
 
 def default_data_transforms(cfg):
     if cfg.name == "mnist":
-        img_transforms = transforms.Compose(
-            [
-                transforms.ToImage(),
-                transforms.ToDtype(torch.float32, scale=True),
-                JaxImageOrder(),
-                Flatten(),
-            ]
-        )
+        img_transforms = [transforms.ToImage(),
+                          transforms.ToDtype(torch.float32, scale=True),
+                          JaxImageOrder()]
+        if cfg.normalize:
+            img_transforms.append(transforms.Normalize((0.1307,), (0.3081,)))
+        if cfg.flatten:
+            img_transforms.append(Flatten())
 
-        return img_transforms, OneHot(10)
+        return transforms.Compose(img_transforms), OneHot(10)
     else:
         return None, None
 
