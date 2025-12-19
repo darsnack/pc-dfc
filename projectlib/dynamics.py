@@ -7,7 +7,8 @@ from tqdm import tqdm
 from projectlib.models import Activation
 
 def pc_error(vs, vs_ff):
-    total_energy = 0.5 * sum(jnp.sum((v - v_ff) ** 2)
+    # TODO: add loss here for PCN variant that can incorporate cross entropy
+    total_energy = 0.5 * sum(jnp.sum((v - v_ff) ** 2, axis=-1)
                              for v, v_ff in zip(vs, vs_ff))
 
     return total_energy
@@ -28,13 +29,19 @@ def pc_step(model: nnx.Module, x, tau = 1, eta = 1, rclamp = None, learn = False
         # compute local gradients w.r.t. to current activations + weights
         grad_fn = nnx.value_and_grad(_compute_pc_error)
 
+    if x.ndim > 1:
+        state_axes = nnx.StateAxes({Activation: 0, nnx.Intermediate: 0, ...: None})
+        clamp_axes = None if rclamp is None else 0
+        grad_fn = nnx.vmap(grad_fn, in_axes=(state_axes, 0, clamp_axes), out_axes=0)
+
     total_energy, grads = grad_fn(model, x, rclamp)
     # update only current activations
     acts_state, other_state = nnx.state(model, acts_only, nnx.Param)
     acts_grads, other_grads = nnx.split_state(grads, acts_only, nnx.Param)
     new_acts = jtr.map(lambda v, dv: v - dv / tau, acts_state, acts_grads)
     if learn:
-        other_state = jtr.map(lambda w, dw: w - eta * dw, other_state, other_grads)
+        # TODO: should we update avg. across batches??
+        other_state = jtr.map(lambda w, dw: w - eta * jnp.mean(dw), other_state, other_grads)
     nnx.update(model, new_acts, other_state)
 
     return total_energy
@@ -74,7 +81,9 @@ def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, eta = 1, rclamp =
                             reversed(model.activations_ff[:-1]),
                             reversed(vjps[1:])):
         # compute gradient w.r.t. weights
-        dw = eta *  model.activation_fn(v)[:, None] @ error[None, :]
+        _v = v if v.ndim == 2 else v[None, :]
+        _e = error if error.ndim == 2 else error[None, :]
+        dw = eta / _e.shape[0] * model.activation_fn(_v).T @ _e
         dws.append(dw)
         # propagate error backwards
         # (i.e. running prod_l J^l e^L)
@@ -85,7 +94,9 @@ def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, eta = 1, rclamp =
         dv = (-v + v_ff + u) / tau
         dvs.append(dv)
     # compute gradient update for first layer
-    dw = eta * x[:, None] @ error[None, :]
+    _x = x if x.ndim == 2 else x[None, :]
+    _e = error if error.ndim == 2 else error[None, :]
+    dw = eta / _e.shape[0] * _x.T @ _e
     dws.append(dw)
 
     # apply dynamics
@@ -96,7 +107,7 @@ def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, eta = 1, rclamp =
         for layer, dw in zip(model.layers, reversed(dws)):
             layer.kernel.value = layer.kernel.value + dw
 
-    return total_energy
+    return jnp.mean(total_energy)
 
 
 def run(model, step_fn, x,
@@ -132,5 +143,6 @@ def is_converged(activations, tolerance):
     if len(activations[0]) < 2:
         return False
     else:
-        dvs = jnp.array([jnp.linalg.norm(act[-1] - act[-2]) ** 2 for act in activations])
-        return jnp.sqrt(jnp.sum(dvs)) < tolerance
+        dvs = jnp.array([jnp.linalg.norm(act[-1] - act[-2], axis=-1) ** 2 for act in activations])
+
+        return jnp.max(jnp.sqrt(jnp.sum(dvs, axis=0))) < tolerance

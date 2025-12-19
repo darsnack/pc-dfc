@@ -4,6 +4,7 @@ import jax.numpy as jnp
 import jax.random as jrng
 from flax import nnx
 from omegaconf import OmegaConf
+from tqdm.auto import tqdm
 
 from projectlib.models import MLP
 from projectlib.dynamics import pc_step, current_pc_vjp, approx_pc_step, run
@@ -14,7 +15,7 @@ def runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, sample_idx):
     # Keep nudging toward current sample until convergence
     nudge_count = 0
     total_timesteps = 0
-    while jnp.linalg.norm(v_fp[-1] - y) > cfg.nudge.convergence_tolerance:
+    while jnp.max(jnp.linalg.norm(v_fp[-1] - y, axis=-1)) > cfg.nudge.convergence_tolerance:
         if nudge_count > cfg.nudge.max_count:
             print("Nudge count exceeded maximum")
             break
@@ -41,7 +42,7 @@ def runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, sample_idx):
         param_change_norm = compute_param_change_norm(pre_nudge_params, post_nudge_params)
 
         # Record nudge statistics
-        error_val = float(jnp.linalg.norm(v_fp[-1] - y))
+        error_val = float(jnp.mean(jnp.linalg.norm(v_fp[-1] - y, axis=-1)))
         total_timesteps += timesteps
 
         # Log each nudge step to wandb
@@ -73,14 +74,14 @@ def train_epoch(cfg, model, v_fp, vjps, dataset_trn, epoch):
     epoch_timestep_counts = []
     epoch_errors = []
 
-    for sample_idx, (x, y) in enumerate(dataset_trn):
-        x, y = jnp.array(x[0]), jnp.array(y[0])
+    for sample_idx, (x, y) in tqdm(enumerate(dataset_trn), desc="training", position=1, leave=False):
+        x, y = jnp.array(x), jnp.array(y)
         nudge_count, total_timesteps, v_fp, vjps = runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, sample_idx)
 
         # Log summary metrics for this sample
         epoch_nudge_counts.append(nudge_count)
         epoch_timestep_counts.append(total_timesteps)
-        epoch_errors.append(float(jnp.linalg.norm(v_fp[-1] - y)))
+        epoch_errors.append(float(jnp.mean(jnp.linalg.norm(v_fp[-1] - y, axis=-1))))
 
         # Log sample-level metrics to wandb
         wandb.log({
@@ -95,8 +96,8 @@ def train_epoch(cfg, model, v_fp, vjps, dataset_trn, epoch):
 
 def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch):
     epoch_errors = []
-    for sample_idx, (x, y) in enumerate(dataset_tst):
-        x, y = jnp.array(x[0]), jnp.array(y[0])
+    for sample_idx, (x, y) in tqdm(enumerate(dataset_tst), desc="testing", position=1, leave=False):
+        x, y = jnp.array(x), jnp.array(y)
         # Set activation to fixed point
         model.set_activations(v_fp)
 
@@ -109,7 +110,7 @@ def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch):
 
         # Record nudge statistics
         v_fp = activations
-        error_val = float(jnp.linalg.norm(v_fp[-1] - y))
+        error_val = float(jnp.mean(jnp.linalg.norm(v_fp[-1] - y, axis=-1)))
         epoch_errors.append(error_val)
 
         # Log sample-level metrics to wandb
@@ -134,7 +135,10 @@ def main(cfg):
         activation_fn = nnx.tanh
     else:
         raise ValueError(f"Unknown activation fn: {cfg.model.activation_fn}")
-    model = MLP(cfg.model.layer_dims, activation_fn=activation_fn, rngs=rngs)
+    model = MLP(cfg.model.layer_dims,
+                activation_fn=activation_fn,
+                batch_size=cfg.training.batch_size,
+                rngs=rngs)
 
     # Load datasets
     transforms = default_data_transforms(cfg.data)
@@ -146,13 +150,13 @@ def main(cfg):
     # Initialize wandb
     wandb.init(entity="mitra-ryan-kyle", project="pc-dfc", config=OmegaConf.to_container(cfg))
 
-    for epoch in range(cfg.training.epochs):
+    for epoch in tqdm(range(cfg.training.epochs), desc="epochs", position=0, leave=True):
         # Initialize to a fixed point using random Gaussian input
         # (think about this deeper later)
-        fp_input = jrng.normal(rngs.train(), input_shape) * 1e-1
+        fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
         init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
         train_epoch(cfg, model, init_v_fp, init_vjps, trn_loader, epoch)
-        fp_input = jrng.normal(rngs.train(), input_shape) * 1e-1
+        fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
         init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
         test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, epoch)
 
