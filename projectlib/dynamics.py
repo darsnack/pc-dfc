@@ -13,6 +13,7 @@ def pc_error(vs, vs_ff):
 
     return total_energy
 
+@nnx.jit(static_argnames=("learn",))
 def pc_step(model: nnx.Module, x, tau = 1, eta = 1, rclamp = None, learn = False):
     def _compute_pc_error(model, x, rclamp):
         _ = model(x, rclamp)
@@ -59,6 +60,7 @@ def current_pc_vjp(model: nnx.Module, x):
 
     return vjps
 
+@nnx.jit(static_argnames=("learn",))
 def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, eta = 1, rclamp = None, learn = False):
     # evaluate bottom up activations
     _ = model(x, rclamp)
@@ -145,4 +147,4 @@ def is_converged(activations, tolerance):
     else:
         dvs = jnp.array([jnp.linalg.norm(act[-1] - act[-2], axis=-1) ** 2 for act in activations])
 
-        return jnp.max(jnp.sqrt(jnp.sum(dvs, axis=0))) < tolerance
+        return jnp.min(jnp.sqrt(jnp.sum(dvs, axis=0))) < tolerance

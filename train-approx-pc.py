@@ -15,7 +15,7 @@ def runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, sample_idx):
     # Keep nudging toward current sample until convergence
     nudge_count = 0
     total_timesteps = 0
-    while jnp.max(jnp.linalg.norm(v_fp[-1] - y, axis=-1)) > cfg.nudge.convergence_tolerance:
+    while jnp.median(jnp.linalg.norm(v_fp[-1][:y.shape[0]] - y, axis=-1)) > cfg.nudge.convergence_tolerance:
         if nudge_count > cfg.nudge.max_count:
             print("Nudge count exceeded maximum")
             break
@@ -42,7 +42,7 @@ def runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, sample_idx):
         param_change_norm = compute_param_change_norm(pre_nudge_params, post_nudge_params)
 
         # Record nudge statistics
-        error_val = float(jnp.mean(jnp.linalg.norm(v_fp[-1] - y, axis=-1)))
+        error_val = float(jnp.mean(jnp.linalg.norm(v_fp[-1][:y.shape[0]] - y, axis=-1)))
         total_timesteps += timesteps
 
         # Log each nudge step to wandb
@@ -81,7 +81,7 @@ def train_epoch(cfg, model, v_fp, vjps, dataset_trn, epoch):
         # Log summary metrics for this sample
         epoch_nudge_counts.append(nudge_count)
         epoch_timestep_counts.append(total_timesteps)
-        epoch_errors.append(float(jnp.mean(jnp.linalg.norm(v_fp[-1] - y, axis=-1))))
+        epoch_errors.append(float(jnp.mean(jnp.linalg.norm(v_fp[-1][:y.shape[0]] - y, axis=-1))))
 
         # Log sample-level metrics to wandb
         wandb.log({
@@ -110,7 +110,7 @@ def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch):
 
         # Record nudge statistics
         v_fp = activations
-        error_val = float(jnp.mean(jnp.linalg.norm(v_fp[-1] - y, axis=-1)))
+        error_val = float(jnp.mean(jnp.linalg.norm(v_fp[-1][:y.shape[0]] - y, axis=-1)))
         epoch_errors.append(error_val)
 
         # Log sample-level metrics to wandb
