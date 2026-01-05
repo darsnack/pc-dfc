@@ -23,7 +23,7 @@ def runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, sample_idx):
         pre_nudge_params = get_model_params(model)
         nudge_count += 1
         # Compute nudge in direction of target/label
-        rclamp = v_fp[-1] + (y - v_fp[-1]) * cfg.nudge.scaling_factor
+        rclamp = v_fp[-1][:y.shape[0]] + (y - v_fp[-1][:y.shape[0]]) * cfg.nudge.scaling_factor
         # Run dynamics until convergence
         _, activations, timesteps = run(model, approx_pc_step, x,
                                         disable_tqdm=True,
