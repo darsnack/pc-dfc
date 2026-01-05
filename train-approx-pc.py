@@ -1,5 +1,6 @@
 import hydra
 import wandb
+import jax
 import jax.numpy as jnp
 import jax.random as jrng
 from flax import nnx
@@ -17,7 +18,7 @@ def runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, sample_idx):
     total_timesteps = 0
     while jnp.median(jnp.linalg.norm(v_fp[-1][:y.shape[0]] - y, axis=-1)) > cfg.nudge.convergence_tolerance:
         if nudge_count > cfg.nudge.max_count:
-            print("Nudge count exceeded maximum")
+            # print("Nudge count exceeded maximum")
             break
         # Store parameters before the nudge
         pre_nudge_params = get_model_params(model)
@@ -28,8 +29,11 @@ def runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, sample_idx):
         _, activations, timesteps = run(model, approx_pc_step, x,
                                         disable_tqdm=True,
                                         vjps=vjps,
-                                        tau=cfg.time_constant,
+                                        tau=cfg.dynamics.time_constant,
                                         eta=cfg.training.learning_rate,
+                                        max_timesteps=cfg.dynamics.max_timesteps,
+                                        tolerance=cfg.dynamics.convergence_tolerance,
+                                        tolerance_style=cfg.dynamics.tolerance_style,
                                         learn=True,
                                         rclamp=rclamp)
         # Update fixed point
@@ -59,7 +63,10 @@ def runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, sample_idx):
 
 def initialize_to_fp(cfg, model, sample):
     _, activations, init_steps = run(model, pc_step, sample,
-                                     disable_tqdm=True, tau=cfg.time_constant, learn=False)
+                                     disable_tqdm=True,
+                                     tau=cfg.dynamics.time_constant,
+                                     tolerance_style=cfg.dynamics.tolerance_style,
+                                     learn=False)
     print(f"Initial convergence took {init_steps} timesteps")
     # Log initial convergence to wandb
     wandb.log({"initial_convergence_timesteps": init_steps})
@@ -89,10 +96,10 @@ def train_epoch(cfg, model, v_fp, vjps, dataset_trn, epoch):
             "train/sample": sample_idx,
             "train/total_nudges_per_sample": nudge_count,
             "train/total_timesteps_per_sample": total_timesteps,
-            "train/final_error": epoch_errors[-1]
+            "train/batch_final_error": epoch_errors[-1]
         }, commit=(sample_idx < len(dataset_trn) - 1))
 
-    wandb.log({"epoch": epoch, "train/epoch_error": jnp.mean(jnp.array(epoch_errors))})
+    wandb.log({"epoch": epoch, "train/avg_epoch_error": jnp.mean(jnp.array(epoch_errors))})
 
 def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch):
     epoch_errors = []
@@ -105,7 +112,7 @@ def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch):
         _, activations, timesteps = run(model, approx_pc_step, x,
                                         disable_tqdm=True,
                                         vjps=vjps,
-                                        tau=cfg.time_constant,
+                                        tau=cfg.dynamics.time_constant,
                                         learn=False)
 
         # Record nudge statistics
@@ -118,10 +125,10 @@ def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch):
             "epoch": epoch,
             "test/sample": sample_idx,
             "test/total_timesteps_per_sample": timesteps,
-            "test/final_error": error_val
+            "test/batch_final_error": error_val
         }, commit=(sample_idx < len(dataset_tst) - 1))
 
-    wandb.log({"epoch": epoch, "test/epoch_error": jnp.mean(jnp.array(epoch_errors))})
+    wandb.log({"epoch": epoch, "test/avg_epoch_error": jnp.mean(jnp.array(epoch_errors))})
 
 @hydra.main(config_path="./configs", config_name="main", version_base=None)
 def main(cfg):
@@ -144,21 +151,33 @@ def main(cfg):
     transforms = default_data_transforms(cfg.data)
     data = load_dataset(cfg.data, rngs.data(), transforms)
     input_shape = data["test"][0][0].shape
-    trn_loader = build_dataloader(data["train"], batch_size=cfg.training.batch_size)
-    tst_loader = build_dataloader(data["test"], batch_size=cfg.training.batch_size)
+    trn_loader = build_dataloader(data["train"], batch_size=cfg.training.batch_size, drop_remainder=True)
+    tst_loader = build_dataloader(data["test"], batch_size=cfg.training.batch_size, drop_remainder=True)
 
     # Initialize wandb
     wandb.init(entity="mitra-ryan-kyle", project="pc-dfc", config=OmegaConf.to_container(cfg))
 
-    for epoch in tqdm(range(cfg.training.epochs), desc="epochs", position=0, leave=True):
-        # Initialize to a fixed point using random Gaussian input
-        # (think about this deeper later)
-        fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
-        init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
-        train_epoch(cfg, model, init_v_fp, init_vjps, trn_loader, epoch)
-        fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
-        init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
-        test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, epoch)
+    if cfg.profile:
+        with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
+            for epoch in tqdm(range(cfg.training.epochs), desc="epochs", position=0, leave=True):
+                # Initialize to a fixed point using random Gaussian input
+                # (think about this deeper later)
+                fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
+                init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
+                train_epoch(cfg, model, init_v_fp, init_vjps, trn_loader, epoch)
+                fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
+                init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
+                test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, epoch)
+    else:
+        for epoch in tqdm(range(cfg.training.epochs), desc="epochs", position=0, leave=True):
+            # Initialize to a fixed point using random Gaussian input
+            # (think about this deeper later)
+            fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
+            init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
+            train_epoch(cfg, model, init_v_fp, init_vjps, trn_loader, epoch)
+            fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
+            init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
+            test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, epoch)
 
     # # Log epoch-level summary statistics
     # wandb.log({

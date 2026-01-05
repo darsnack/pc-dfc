@@ -3,7 +3,11 @@ defaults:
 - _self_
 - optional task-overrides: ${data}
 
-time_constant: 30 # membrane time constant (units of dt)
+dynamics:
+  time_constant: 30 # membrane time constant (units of dt)
+  max_timesteps: 5000
+  convergence_tolerance: 1e-5
+  tolerance_style: norm
 nudge:
   max_count: 100
   convergence_tolerance: 1e-5
@@ -16,3 +20,4 @@ training:
   epochs: 50
   learning_rate: 1e-3
   batch_size: 1
+profile: false
