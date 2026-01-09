@@ -171,7 +171,7 @@ def main(cfg):
     wandb.init(entity="mitra-ryan-kyle", project="pc-dfc", config=OmegaConf.to_container(cfg))
 
     if cfg.profile:
-        with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
+        with jax.profiler.trace("/tmp/jax-trace", create_perfetto_trace=False):
             for epoch in tqdm(range(cfg.training.epochs), desc="epochs", position=0, leave=True):
                 # Initialize to a fixed point using random Gaussian input
                 # (think about this deeper later)
