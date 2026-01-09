@@ -67,7 +67,7 @@ def initialize_to_fp(cfg, model, sample):
                                      tau=cfg.dynamics.time_constant,
                                      tolerance_style=cfg.dynamics.tolerance_style,
                                      learn=False)
-    print(f"Initial convergence took {init_steps} timesteps")
+    tqdm.write(f"Initial convergence took {init_steps} timesteps")
     # Log initial convergence to wandb
     wandb.log({"initial_convergence_timesteps": init_steps})
     # Store fixed point of last layer

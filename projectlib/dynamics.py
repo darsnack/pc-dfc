@@ -48,6 +48,7 @@ def pc_step(model: nnx.Module, x, tau = 1, eta = 1, rclamp = None, learn = False
 
     return total_energy
 
+@nnx.jit
 def current_pc_vjp(model: nnx.Module, x):
     # get inputs for each layer
     vs = (x, *(v.value for v in model.activations[:-1]))
