@@ -7,7 +7,7 @@ from flax import nnx
 from omegaconf import OmegaConf
 from tqdm.auto import tqdm
 
-from projectlib.models import MLP
+from projectlib.models import MLP, Activation
 from projectlib.dynamics import pc_step, current_pc_vjp, approx_pc_step, run
 from projectlib.data import load_dataset, build_dataloader, default_data_transforms
 from projectlib.utils import noop, get_model_params, compute_param_change_norm
@@ -133,19 +133,32 @@ def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch):
 @hydra.main(config_path="./configs", config_name="main", version_base=None)
 def main(cfg):
     # Initialize random number generator
-    rngs = nnx.Rngs(cfg.seed, params=cfg.seed + 1, train=cfg.seed + 2, data=cfg.seed + 3)
+    rngs = nnx.Rngs(cfg.seed,
+                    params=cfg.seed + 1,
+                    train=cfg.seed + 2,
+                    data=cfg.seed + 3,
+                    activations=cfg.seed + 4)
 
     # Build model
+    # Select activation function
     if cfg.model.activation_fn == "noop":
         activation_fn = noop
     elif cfg.model.activation_fn == "tanh":
         activation_fn = nnx.tanh
     else:
         raise ValueError(f"Unknown activation fn: {cfg.model.activation_fn}")
-    model = MLP(cfg.model.layer_dims,
-                activation_fn=activation_fn,
-                batch_size=cfg.training.batch_size,
-                rngs=rngs)
+    # Vmap over batch_size > 1 so stored activations are appropriately sized
+    if cfg.training.batch_size > 1:
+        with nnx.split_rngs(rngs, splits=cfg.training.batch_size, only="activations"):
+            state_axes = nnx.StateAxes({(Activation, "activations"): 0, ...: None})
+            model = nnx.vmap(lambda r:
+                MLP(cfg.model.layer_dims, activation_fn=activation_fn, rngs=r),
+            in_axes=(state_axes,), out_axes=state_axes)(rngs)
+    else:
+        model = MLP(cfg.model.layer_dims,
+                    activation_fn=activation_fn,
+                    batch_size=cfg.training.batch_size,
+                    rngs=rngs)
 
     # Load datasets
     transforms = default_data_transforms(cfg.data)
