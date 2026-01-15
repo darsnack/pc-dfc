@@ -181,9 +181,13 @@ def main(cfg):
     # Initialize wandb
     wandb.init(entity="mitra-ryan-kyle", project="pc-dfc", config=OmegaConf.to_container(cfg))
 
+    # Initial test epoch
+    fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
+    init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
+    test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, 0)
     if cfg.profile:
         with jax.profiler.trace("/tmp/jax-trace", create_perfetto_trace=False):
-            for epoch in tqdm(range(cfg.training.epochs), desc="epochs", position=0, leave=True):
+            for epoch in tqdm(range(1, cfg.training.epochs + 1), desc="epochs", position=0, leave=True):
                 # Initialize to a fixed point using random Gaussian input
                 # (think about this deeper later)
                 # fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
@@ -193,7 +197,7 @@ def main(cfg):
                 init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
                 test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, epoch)
     else:
-        for epoch in tqdm(range(cfg.training.epochs), desc="epochs", position=0, leave=True):
+        for epoch in tqdm(range(1, cfg.training.epochs + 1), desc="epochs", position=0, leave=True):
             # Initialize to a fixed point using random Gaussian input
             # (think about this deeper later)
             # fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
