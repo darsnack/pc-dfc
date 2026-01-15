@@ -76,13 +76,14 @@ def initialize_to_fp(cfg, model, sample):
 
     return init_v_fp, init_vjps
 
-def train_epoch(cfg, model, v_fp, vjps, dataset_trn, epoch):
+def train_epoch(cfg, model, dataset_trn, epoch):
     epoch_nudge_counts = []
     epoch_timestep_counts = []
     epoch_errors = []
 
     for sample_idx, (x, y) in tqdm(enumerate(dataset_trn), desc="training", position=1, leave=False):
         x, y = jnp.array(x), jnp.array(y)
+        v_fp, vjps = initialize_to_fp(cfg, model, x)
         nudge_count, total_timesteps, v_fp, vjps = runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, sample_idx)
 
         # Log summary metrics for this sample
@@ -176,8 +177,8 @@ def main(cfg):
                 # Initialize to a fixed point using random Gaussian input
                 # (think about this deeper later)
                 fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
-                init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
-                train_epoch(cfg, model, init_v_fp, init_vjps, trn_loader, epoch)
+                # init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
+                train_epoch(cfg, model, trn_loader, epoch)
                 fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
                 init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
                 test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, epoch)
@@ -186,8 +187,8 @@ def main(cfg):
             # Initialize to a fixed point using random Gaussian input
             # (think about this deeper later)
             fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
-            init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
-            train_epoch(cfg, model, init_v_fp, init_vjps, trn_loader, epoch)
+            # init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
+            train_epoch(cfg, model, trn_loader, epoch)
             fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
             init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
             test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, epoch)
