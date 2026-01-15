@@ -10,7 +10,7 @@ from tqdm.auto import tqdm
 from projectlib.models import MLP, Activation
 from projectlib.dynamics import pc_step, current_pc_vjp, approx_pc_step, run
 from projectlib.data import load_dataset, build_dataloader, default_data_transforms
-from projectlib.utils import noop, get_model_params, compute_param_change_norm
+from projectlib.utils import noop, get_model_params, compute_param_change_norm, accuracy
 
 def runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, sample_idx):
     # Keep nudging toward current sample until convergence
@@ -80,6 +80,7 @@ def train_epoch(cfg, model, dataset_trn, epoch):
     epoch_nudge_counts = []
     epoch_timestep_counts = []
     epoch_errors = []
+    epoch_accuracies = []
 
     for sample_idx, (x, y) in tqdm(enumerate(dataset_trn), desc="training", position=1, leave=False):
         x, y = jnp.array(x), jnp.array(y)
@@ -90,6 +91,7 @@ def train_epoch(cfg, model, dataset_trn, epoch):
         epoch_nudge_counts.append(nudge_count)
         epoch_timestep_counts.append(total_timesteps)
         epoch_errors.append(float(jnp.mean(jnp.linalg.norm(v_fp[-1][:y.shape[0]] - y, axis=-1))))
+        epoch_accuracies.append(float(accuracy(v_fp[-1][:y.shape[0]], y)))
 
         # Log sample-level metrics to wandb
         wandb.log({
@@ -97,13 +99,17 @@ def train_epoch(cfg, model, dataset_trn, epoch):
             "train/sample": sample_idx,
             "train/total_nudges_per_sample": nudge_count,
             "train/total_timesteps_per_sample": total_timesteps,
-            "train/batch_final_error": epoch_errors[-1]
+            "train/batch_final_error": epoch_errors[-1],
+            "train/batch_final_accuracy": epoch_accuracies[-1]
         }, commit=(sample_idx < len(dataset_trn) - 1))
 
-    wandb.log({"epoch": epoch, "train/avg_epoch_error": jnp.mean(jnp.array(epoch_errors))})
+    wandb.log({"epoch": epoch,
+               "train/avg_epoch_error": jnp.mean(jnp.array(epoch_errors)),
+               "train/avg_epoch_accuracy": jnp.mean(jnp.array(epoch_accuracies))})
 
 def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch):
     epoch_errors = []
+    epoch_accuracies = []
     for sample_idx, (x, y) in tqdm(enumerate(dataset_tst), desc="testing", position=1, leave=False):
         x, y = jnp.array(x), jnp.array(y)
         # Set activation to fixed point
@@ -120,16 +126,20 @@ def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch):
         v_fp = activations
         error_val = float(jnp.mean(jnp.linalg.norm(v_fp[-1][:y.shape[0]] - y, axis=-1)))
         epoch_errors.append(error_val)
+        epoch_accuracies.append(float(accuracy(v_fp[-1][:y.shape[0]], y)))
 
         # Log sample-level metrics to wandb
         wandb.log({
             "epoch": epoch,
             "test/sample": sample_idx,
             "test/total_timesteps_per_sample": timesteps,
-            "test/batch_final_error": error_val
+            "test/batch_final_error": error_val,
+            "test/batch_final_accuracy": epoch_accuracies[-1]
         }, commit=(sample_idx < len(dataset_tst) - 1))
 
-    wandb.log({"epoch": epoch, "test/avg_epoch_error": jnp.mean(jnp.array(epoch_errors))})
+    wandb.log({"epoch": epoch,
+               "test/avg_epoch_error": jnp.mean(jnp.array(epoch_errors)),
+               "test/avg_epoch_accuracy": jnp.mean(jnp.array(epoch_accuracies))})
 
 @hydra.main(config_path="./configs", config_name="main", version_base=None)
 def main(cfg):
@@ -176,7 +186,7 @@ def main(cfg):
             for epoch in tqdm(range(cfg.training.epochs), desc="epochs", position=0, leave=True):
                 # Initialize to a fixed point using random Gaussian input
                 # (think about this deeper later)
-                fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
+                # fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
                 # init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
                 train_epoch(cfg, model, trn_loader, epoch)
                 fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
@@ -186,7 +196,7 @@ def main(cfg):
         for epoch in tqdm(range(cfg.training.epochs), desc="epochs", position=0, leave=True):
             # Initialize to a fixed point using random Gaussian input
             # (think about this deeper later)
-            fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
+            # fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
             # init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
             train_epoch(cfg, model, trn_loader, epoch)
             fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1

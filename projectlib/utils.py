@@ -7,6 +7,9 @@ from projectlib.models import Activation
 def noop(x, *_):
     return x
 
+def accuracy(ypred, ytrue):
+    return jnp.mean(jnp.argmax(ypred, axis=-1) == jnp.argmax(ytrue, axis=-1))
+
 @nnx.jit
 def get_model_params(model):
     """Extract all model parameters as a flat dictionary."""
