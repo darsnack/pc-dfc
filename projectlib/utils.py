@@ -7,6 +7,7 @@ from projectlib.models import Activation
 def noop(x, *_):
     return x
 
+@nnx.jit
 def accuracy(ypred, ytrue):
     return jnp.mean(jnp.argmax(ypred, axis=-1) == jnp.argmax(ytrue, axis=-1))
 

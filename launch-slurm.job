@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-task=56               ### Number of CPUs per Task
 #SBATCH --mem=160G                       ### Memory required
 #SBATCH --partition=gpuq
-#SBATCH --qos=bio_ai
+#SBATCH --qos=default
 #SBATCH --time=48:00:00
 #SBATCH --gres=gpu:h100:1
 #SBATCH --output=slurm-logs/%x_%A_%a.out ### Slurm Output file, %x is job name, %A is array job id, %a is array job index
