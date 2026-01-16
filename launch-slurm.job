@@ -5,19 +5,21 @@
 #SBATCH --mem=160G                       ### Memory required
 #SBATCH --partition=gpuq
 #SBATCH --qos=default
-#SBATCH --time=48:00:00
+#SBATCH --time=12:00:00
 #SBATCH --gres=gpu:h100:1
 #SBATCH --output=slurm-logs/%x_%A_%a.out ### Slurm Output file, %x is job name, %A is array job id, %a is array job index
 #SBATCH --error=slurm-logs/%x_%A_%a.out  ### Slurm Error file, %x is job name, %A is array job id, %a is array job index
 
-# potentially turn SLURM_ARRAY into a real array
-SLURM_ARRAY=( $SLURM_ARRAY )
-echo "SLURM_ARRAY: $SLURM_ARRAY"
-echo "SLURM_ARRAY[1]: ${SLURM_ARRAY[1]}"
-# activate environment
+# print path for debug
 echo "PATH: $PATH"
 # show state of gpus
 echo "GPUS: $CUDA_VISIBLE_DEVICES"
-# run command passed to slurm
-echo "Running $@"
-eval PYTHONFAULTHANDLER=1 XLA_PYTHON_CLIENT_PREALLOCATE=1 uv run $@
+# potentially invoked as a wandb sweep
+if [[ $SLURM_SWEEP_ID ]]; then
+    echo "Setting to sweep with id = ${SLURM_SWEEP_ID}"
+    uv run wandb agent --entity "mitra-ryan-kyle" --project "pc-dfc" --count 1 $SLURM_SWEEP_ID
+else
+    # run command passed to slurm
+    echo "Running $@"
+    eval PYTHONFAULTHANDLER=1 XLA_PYTHON_CLIENT_PREALLOCATE=1 uv run $@
+fi

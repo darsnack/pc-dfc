@@ -179,7 +179,9 @@ def main(cfg):
     tst_loader = build_dataloader(data["test"], batch_size=cfg.training.batch_size, drop_remainder=True)
 
     # Initialize wandb
-    wandb.init(entity="mitra-ryan-kyle", project="pc-dfc", config=OmegaConf.to_container(cfg))
+    wandb.init(entity="mitra-ryan-kyle",
+               project="pc-dfc",
+               config=OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)) # type: ignore
 
     # Initial test epoch
     fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1

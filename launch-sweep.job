@@ -1,0 +1,23 @@
+#!/bin/bash
+#SBATCH --job-name=pc-dfc                ### Name of the job
+#SBATCH --ntasks=1                       ### Number of Tasks
+#SBATCH --cpus-per-task=4                ### Number of CPUs per Task
+#SBATCH --mem=2G                         ### Memory required
+#SBATCH --partition=cpuq
+#SBATCH --qos=cpuq_base
+#SBATCH --time=1:00:00
+#SBATCH --output=slurm-logs/%x_%A_%a.out ### Slurm Output file, %x is job name, %A is array job id, %a is array job index
+#SBATCH --error=slurm-logs/%x_%A_%a.out  ### Slurm Error file, %x is job name, %A is array job id, %a is array job index
+
+# run sweep setup
+# first arg is sweep file path
+read SLURM_SWEEP_ID NJOBS <<< "$( uv run setup-sweep.py $1 | tail -n 1 )"
+export SLURM_SWEEP_ID
+echo "Running sweep with ID = ${SLURM_SWEEP_ID} and NJOBS = ${NJOBS}"
+
+# run sweep jobs
+sbatch\
+    --export=ALL\
+    --array=0-$((${NJOBS}-1))\
+    --job-name=pc-dfc-sweep-${SLURM_SWEEP_ID}\
+    launch-slurm.job "${@:2}"
