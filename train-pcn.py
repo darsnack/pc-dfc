@@ -1,0 +1,154 @@
+import hydra
+import wandb
+import jax
+import jax.numpy as jnp
+import jax.random as jrng
+from flax import nnx
+from omegaconf import OmegaConf
+from tqdm.auto import tqdm
+
+from projectlib.models import MLP, Activation
+from projectlib.dynamics import pc_step, run
+from projectlib.data import load_dataset, build_dataloader, default_data_transforms
+from projectlib.utils import noop, accuracy
+
+def run_sample(cfg, x, y, model, epoch, sample_idx):
+    _, activations, timesteps = run(model, pc_step, x,
+                                    disable_tqdm=True,
+                                    tau=cfg.dynamics.time_constant,
+                                    eta=cfg.training.learning_rate,
+                                    max_timesteps=cfg.dynamics.max_timesteps,
+                                    tolerance=cfg.dynamics.convergence_tolerance,
+                                    tolerance_style=cfg.dynamics.tolerance_style,
+                                    learn=True,
+                                    rclamp=y)
+
+    error_val = float(jnp.mean(jnp.linalg.norm(activations[-1][:y.shape[0]] - y, axis=-1)))
+
+    wandb.log({
+        "epoch": epoch,
+        "train/sample": sample_idx,
+        "train/timesteps": timesteps,
+        "train/error": error_val
+    }, commit=True)
+
+    return activations
+
+def initialize_to_fp(cfg, model, sample):
+    _, activations, init_steps = run(model, pc_step, sample,
+                                     disable_tqdm=True,
+                                     tau=cfg.dynamics.time_constant,
+                                     tolerance_style=cfg.dynamics.tolerance_style,
+                                     learn=False)
+    tqdm.write(f"Initial convergence took {init_steps} timesteps")
+    wandb.log({"initial_convergence_timesteps": init_steps})
+    return activations
+
+def train_epoch(cfg, model, dataset_trn, epoch):
+    epoch_errors = []
+    epoch_accuracies = []
+
+    for sample_idx, (x, y) in tqdm(enumerate(dataset_trn), desc="training", position=1, leave=False):
+        x, y = jnp.array(x), jnp.array(y)
+        v_fp = initialize_to_fp(cfg, model, x)
+        v_fp = run_sample(cfg, x, y, model, epoch, sample_idx)
+
+        epoch_errors.append(float(jnp.mean(jnp.linalg.norm(v_fp[-1][:y.shape[0]] - y, axis=-1))))
+        epoch_accuracies.append(float(accuracy(v_fp[-1][:y.shape[0]], y)))
+
+        wandb.log({
+            "epoch": epoch,
+            "train/sample": sample_idx,
+            "train/batch_final_error": epoch_errors[-1],
+            "train/batch_final_accuracy": epoch_accuracies[-1]
+        }, commit=(sample_idx < len(dataset_trn) - 1))
+
+    wandb.log({"epoch": epoch,
+               "train/avg_epoch_error": jnp.mean(jnp.array(epoch_errors)),
+               "train/avg_epoch_accuracy": jnp.mean(jnp.array(epoch_accuracies))})
+
+def test_epoch(cfg, model, v_fp, dataset_tst, epoch):
+    epoch_errors = []
+    epoch_accuracies = []
+    for sample_idx, (x, y) in tqdm(enumerate(dataset_tst), desc="testing", position=1, leave=False):
+        x, y = jnp.array(x), jnp.array(y)
+        model.set_activations(v_fp)
+
+        _, activations, timesteps = run(model, pc_step, x,
+                                        disable_tqdm=True,
+                                        tau=cfg.dynamics.time_constant,
+                                        learn=False)
+
+        v_fp = activations
+        error_val = float(jnp.mean(jnp.linalg.norm(v_fp[-1][:y.shape[0]] - y, axis=-1)))
+        epoch_errors.append(error_val)
+        epoch_accuracies.append(float(accuracy(v_fp[-1][:y.shape[0]], y)))
+
+        wandb.log({
+            "epoch": epoch,
+            "test/sample": sample_idx,
+            "test/total_timesteps_per_sample": timesteps,
+            "test/batch_final_error": error_val,
+            "test/batch_final_accuracy": epoch_accuracies[-1]
+        }, commit=(sample_idx < len(dataset_tst) - 1))
+
+    wandb.log({"epoch": epoch,
+               "test/avg_epoch_error": jnp.mean(jnp.array(epoch_errors)),
+               "test/avg_epoch_accuracy": jnp.mean(jnp.array(epoch_accuracies))})
+
+@hydra.main(config_path="./configs", config_name="main", version_base=None)
+def main(cfg):
+    rngs = nnx.Rngs(cfg.seed,
+                    params=cfg.seed + 1,
+                    train=cfg.seed + 2,
+                    data=cfg.seed + 3,
+                    activations=cfg.seed + 4)
+
+    if cfg.model.activation_fn == "noop":
+        activation_fn = noop
+    elif cfg.model.activation_fn == "tanh":
+        activation_fn = nnx.tanh
+    else:
+        raise ValueError(f"Unknown activation fn: {cfg.model.activation_fn}")
+    if cfg.training.batch_size > 1:
+        with nnx.split_rngs(rngs, splits=cfg.training.batch_size, only="activations"):
+            state_axes = nnx.StateAxes({(Activation, "activations"): 0, ...: None})
+            model = nnx.vmap(lambda r:
+                MLP(cfg.model.layer_dims, activation_fn=activation_fn, rngs=r),
+            in_axes=(state_axes,), out_axes=state_axes)(rngs)
+    else:
+        model = MLP(cfg.model.layer_dims,
+                    activation_fn=activation_fn,
+                    batch_size=cfg.training.batch_size,
+                    rngs=rngs)
+
+    transforms = default_data_transforms(cfg.data)
+    data = load_dataset(cfg.data, rngs.data(), transforms)
+    input_shape = data["test"][0][0].shape
+    trn_loader = build_dataloader(data["train"], batch_size=cfg.training.batch_size, drop_remainder=True)
+    tst_loader = build_dataloader(data["test"], batch_size=cfg.training.batch_size, drop_remainder=True)
+
+    wandb.init(entity="mitra-ryan-kyle",
+               project="pc-dfc",
+               config=OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True))
+
+    fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
+    init_v_fp = initialize_to_fp(cfg, model, fp_input)
+    test_epoch(cfg, model, init_v_fp, tst_loader, 0)
+    if cfg.profile:
+        with jax.profiler.trace("/tmp/jax-trace", create_perfetto_trace=False):
+            for epoch in tqdm(range(1, cfg.training.epochs + 1), desc="epochs", position=0, leave=True):
+                train_epoch(cfg, model, trn_loader, epoch)
+                fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
+                init_v_fp = initialize_to_fp(cfg, model, fp_input)
+                test_epoch(cfg, model, init_v_fp, tst_loader, epoch)
+    else:
+        for epoch in tqdm(range(1, cfg.training.epochs + 1), desc="epochs", position=0, leave=True):
+            train_epoch(cfg, model, trn_loader, epoch)
+            fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
+            init_v_fp = initialize_to_fp(cfg, model, fp_input)
+            test_epoch(cfg, model, init_v_fp, tst_loader, epoch)
+
+
+if __name__ == "__main__":
+    main()
