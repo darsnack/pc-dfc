@@ -58,6 +58,21 @@ def runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, sample_idx):
             "train/error": error_val,
             "train/weight_change_norm": float(param_change_norm)
         }, commit=(error_val > cfg.nudge.convergence_tolerance))
+        
+        # wandb.log({
+        #     "activity/u0/clamp": float(jnp.mean(rclamp,axis=0)[0]),
+        #     "activity/u0/activity": float(jnp.mean(activations[-1],axis=0)[0]),
+        # })
+
+        clamp_mean = jnp.mean(rclamp, axis=0)          # (units,)
+        act_mean   = jnp.mean(activations[-1], axis=0) # (units,)
+    
+        log_dict = {}
+        for u in range(clamp_mean.shape[0]):
+            log_dict[f"activity/u{u}/clamp"]    = float(clamp_mean[u])
+            log_dict[f"activity/u{u}/activity"] = float(act_mean[u])
+        wandb.log(log_dict)
+
 
     return nudge_count, total_timesteps, v_fp, vjps
 
