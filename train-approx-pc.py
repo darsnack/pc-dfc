@@ -31,6 +31,7 @@ def runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, sample_idx):
                                         vjps=vjps,
                                         tau=cfg.dynamics.time_constant,
                                         eta=cfg.training.learning_rate,
+                                        min_timesteps=cfg.dynamics.min_timesteps,
                                         max_timesteps=cfg.dynamics.max_timesteps,
                                         tolerance=cfg.dynamics.convergence_tolerance,
                                         tolerance_style=cfg.dynamics.tolerance_style,
@@ -58,7 +59,7 @@ def runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, sample_idx):
             "train/error": error_val,
             "train/weight_change_norm": float(param_change_norm)
         }, commit=(error_val > cfg.nudge.convergence_tolerance))
-        
+
         # wandb.log({
         #     "activity/u0/clamp": float(jnp.mean(rclamp,axis=0)[0]),
         #     "activity/u0/activity": float(jnp.mean(activations[-1],axis=0)[0]),
@@ -66,7 +67,7 @@ def runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, sample_idx):
 
         clamp_mean = jnp.mean(rclamp, axis=0)          # (units,)
         act_mean   = jnp.mean(activations[-1], axis=0) # (units,)
-    
+
         log_dict = {}
         for u in range(clamp_mean.shape[0]):
             log_dict[f"activity/u{u}/clamp"]    = float(clamp_mean[u])
@@ -98,9 +99,10 @@ def train_epoch(cfg, model, dataset_trn, epoch):
     epoch_accuracies = []
 
     for sample_idx, (x, y) in tqdm(enumerate(dataset_trn), desc="training", position=1, leave=False):
+        global_sample_idx = sample_idx + len(dataset_trn) * epoch
         x, y = jnp.array(x), jnp.array(y)
         v_fp, vjps = initialize_to_fp(cfg, model, x)
-        nudge_count, total_timesteps, v_fp, vjps = runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, sample_idx)
+        nudge_count, total_timesteps, v_fp, vjps = runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, global_sample_idx)
 
         # Log summary metrics for this sample
         epoch_nudge_counts.append(nudge_count)
@@ -111,7 +113,7 @@ def train_epoch(cfg, model, dataset_trn, epoch):
         # Log sample-level metrics to wandb
         wandb.log({
             "epoch": epoch,
-            "train/sample": sample_idx,
+            "train/sample": global_sample_idx,
             "train/total_nudges_per_sample": nudge_count,
             "train/total_timesteps_per_sample": total_timesteps,
             "train/batch_final_error": epoch_errors[-1],
@@ -126,6 +128,7 @@ def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch):
     epoch_errors = []
     epoch_accuracies = []
     for sample_idx, (x, y) in tqdm(enumerate(dataset_tst), desc="testing", position=1, leave=False):
+        global_sample_idx = sample_idx + len(dataset_tst) * epoch
         x, y = jnp.array(x), jnp.array(y)
         # Set activation to fixed point
         model.set_activations(v_fp)
@@ -146,7 +149,7 @@ def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch):
         # Log sample-level metrics to wandb
         wandb.log({
             "epoch": epoch,
-            "test/sample": sample_idx,
+            "test/sample": global_sample_idx,
             "test/total_timesteps_per_sample": timesteps,
             "test/batch_final_error": error_val,
             "test/batch_final_accuracy": epoch_accuracies[-1]

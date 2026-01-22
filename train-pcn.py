@@ -13,22 +13,33 @@ from projectlib.data import load_dataset, build_dataloader, default_data_transfo
 from projectlib.utils import noop, accuracy
 
 def run_sample(cfg, x, y, model, epoch, sample_idx):
-    _, activations, timesteps = run(model, pc_step, x,
-                                    disable_tqdm=True,
-                                    tau=cfg.dynamics.time_constant,
-                                    eta=cfg.training.learning_rate,
-                                    max_timesteps=cfg.dynamics.max_timesteps,
-                                    tolerance=cfg.dynamics.convergence_tolerance,
-                                    tolerance_style=cfg.dynamics.tolerance_style,
-                                    learn=True,
-                                    rclamp=y)
+    # _, _, conv_timesteps = run(model, pc_step, x,
+    #                            disable_tqdm=True,
+    #                            tau=cfg.dynamics.time_constant,
+    #                            eta=cfg.training.learning_rate,
+    #                            min_timesteps=cfg.dynamics.min_timesteps,
+    #                            max_timesteps=cfg.dynamics.max_timesteps,
+    #                            tolerance=cfg.dynamics.convergence_tolerance,
+    #                            tolerance_style=cfg.dynamics.tolerance_style,
+    #                            learn=False,
+    #                            rclamp=y)
+    _, activations, learn_timesteps = run(model, pc_step, x,
+                                          disable_tqdm=True,
+                                          tau=cfg.dynamics.time_constant,
+                                          eta=cfg.training.learning_rate,
+                                          min_timesteps=cfg.dynamics.min_timesteps,
+                                          max_timesteps=cfg.dynamics.max_timesteps,
+                                          tolerance=cfg.dynamics.convergence_tolerance,
+                                          tolerance_style=cfg.dynamics.tolerance_style,
+                                          learn=True,
+                                          rclamp=y)
 
     error_val = float(jnp.mean(jnp.linalg.norm(activations[-1][:y.shape[0]] - y, axis=-1)))
 
     wandb.log({
         "epoch": epoch,
         "train/sample": sample_idx,
-        "train/timesteps": timesteps,
+        "train/timesteps": conv_timesteps + learn_timesteps,
         "train/error": error_val
     }, commit=True)
 
@@ -49,16 +60,17 @@ def train_epoch(cfg, model, dataset_trn, epoch):
     epoch_accuracies = []
 
     for sample_idx, (x, y) in tqdm(enumerate(dataset_trn), desc="training", position=1, leave=False):
+        global_sample_idx = sample_idx + len(dataset_trn) * epoch
         x, y = jnp.array(x), jnp.array(y)
         v_fp = initialize_to_fp(cfg, model, x)
-        v_fp = run_sample(cfg, x, y, model, epoch, sample_idx)
+        v_fp = run_sample(cfg, x, y, model, epoch, global_sample_idx)
 
         epoch_errors.append(float(jnp.mean(jnp.linalg.norm(v_fp[-1][:y.shape[0]] - y, axis=-1))))
         epoch_accuracies.append(float(accuracy(v_fp[-1][:y.shape[0]], y)))
 
         wandb.log({
             "epoch": epoch,
-            "train/sample": sample_idx,
+            "train/sample": global_sample_idx,
             "train/batch_final_error": epoch_errors[-1],
             "train/batch_final_accuracy": epoch_accuracies[-1]
         }, commit=(sample_idx < len(dataset_trn) - 1))
@@ -71,6 +83,7 @@ def test_epoch(cfg, model, v_fp, dataset_tst, epoch):
     epoch_errors = []
     epoch_accuracies = []
     for sample_idx, (x, y) in tqdm(enumerate(dataset_tst), desc="testing", position=1, leave=False):
+        global_sample_idx = sample_idx + len(dataset_tst) * epoch
         x, y = jnp.array(x), jnp.array(y)
         model.set_activations(v_fp)
 
@@ -86,7 +99,7 @@ def test_epoch(cfg, model, v_fp, dataset_tst, epoch):
 
         wandb.log({
             "epoch": epoch,
-            "test/sample": sample_idx,
+            "test/sample": global_sample_idx,
             "test/total_timesteps_per_sample": timesteps,
             "test/batch_final_error": error_val,
             "test/batch_final_accuracy": epoch_accuracies[-1]

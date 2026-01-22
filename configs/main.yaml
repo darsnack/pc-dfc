@@ -5,6 +5,7 @@ defaults:
 
 dynamics:
   time_constant: 30 # membrane time constant (units of dt)
+  min_timesteps: 5
   max_timesteps: 5000
   convergence_tolerance: 1e-5
   tolerance_style: norm

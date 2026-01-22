@@ -20,4 +20,5 @@ sbatch\
     --export=ALL\
     --array=0-$((${NJOBS}-1))\
     --job-name=pc-dfc-sweep-${SLURM_SWEEP_ID}\
+    --qos=slow_nice\
     launch-slurm.job "${@:2}"
