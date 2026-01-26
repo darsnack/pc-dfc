@@ -1,0 +1,7 @@
+# @package _global_
+
+defaults:
+- gaussian
+
+training:
+  learning_rate: 1e-2

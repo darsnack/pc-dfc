@@ -77,9 +77,31 @@ def load_dataset(cfg, rng_key, transforms = (None, None)):
         xs_trn_key, xs_tst_key, w_key = jrng.split(rng_key, 3)
         xs_trn = jrng.normal(xs_trn_key, (cfg.train_size, cfg.input_dim)) * cfg.input_stddev
         xs_tst = jrng.normal(xs_tst_key, (cfg.test_size, cfg.input_dim)) * cfg.input_stddev
-        w = jrng.normal(w_key, (cfg.input_dim,))
+        w = jrng.normal(w_key, (cfg.input_dim, cfg.output_dim))
         ys_trn = xs_trn @ w
         ys_tst = xs_tst @ w
+        if ys_trn.ndim == 1:
+            ys_trn = ys_trn[:, None]
+            ys_tst = ys_tst[:, None]
+        # convert to torch
+        xs_trn = _to_tensor(xs_trn)
+        xs_tst = _to_tensor(xs_tst)
+        ys_trn = _to_tensor(ys_trn)
+        ys_tst = _to_tensor(ys_tst)
+
+        return {
+            "train": TensorDataset(xs_trn, ys_trn),
+            "test": TensorDataset(xs_tst, ys_tst),
+        }
+    elif cfg.name == "gaussian-clamped":
+        xs_trn_key, xs_tst_key, w_key = jrng.split(rng_key, 3)
+        xs_trn = jrng.normal(xs_trn_key, (cfg.train_size, cfg.input_dim)) * cfg.input_stddev
+        xs_tst = jrng.normal(xs_tst_key, (cfg.test_size, cfg.input_dim)) * cfg.input_stddev
+        ys_trn = jnp.ones_like(xs_trn, shape=(cfg.train_size, cfg.output_dim))
+        ys_tst = jnp.ones_like(xs_tst, shape=(cfg.test_size, cfg.output_dim))
+        if ys_trn.ndim == 1:
+            ys_trn = ys_trn[:, None]
+            ys_tst = ys_tst[:, None]
         # convert to torch
         xs_trn = _to_tensor(xs_trn)
         xs_tst = _to_tensor(xs_tst)
@@ -91,7 +113,7 @@ def load_dataset(cfg, rng_key, transforms = (None, None)):
             "test": TensorDataset(xs_tst, ys_tst),
         }
     else:
-        raise RuntimeError(f"Unknown {dataset=}.")
+        raise RuntimeError(f"Unknown {cfg.name=}.")
 
 def build_dataloader(data,
                      batch_size=1,

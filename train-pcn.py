@@ -10,37 +10,53 @@ from tqdm.auto import tqdm
 from projectlib.models import MLP, Activation
 from projectlib.dynamics import pc_step, run
 from projectlib.data import load_dataset, build_dataloader, default_data_transforms
-from projectlib.utils import noop, accuracy
+from projectlib.utils import noop, accuracy, get_model_params, compute_param_change_norm
 
 def run_sample(cfg, x, y, model, epoch, sample_idx):
-    # _, _, conv_timesteps = run(model, pc_step, x,
-    #                            disable_tqdm=True,
-    #                            tau=cfg.dynamics.time_constant,
-    #                            eta=cfg.training.learning_rate,
-    #                            min_timesteps=cfg.dynamics.min_timesteps,
-    #                            max_timesteps=cfg.dynamics.max_timesteps,
-    #                            tolerance=cfg.dynamics.convergence_tolerance,
-    #                            tolerance_style=cfg.dynamics.tolerance_style,
-    #                            learn=False,
-    #                            rclamp=y)
-    _, activations, learn_timesteps = run(model, pc_step, x,
-                                          disable_tqdm=True,
-                                          tau=cfg.dynamics.time_constant,
-                                          eta=cfg.training.learning_rate,
-                                          min_timesteps=cfg.dynamics.min_timesteps,
-                                          max_timesteps=cfg.dynamics.max_timesteps,
-                                          tolerance=cfg.dynamics.convergence_tolerance,
-                                          tolerance_style=cfg.dynamics.tolerance_style,
-                                          learn=True,
-                                          rclamp=y)
+    # Store parameters after the nudge
+    pre_nudge_params = get_model_params(model)
+    _, _, conv_timesteps = run(model, pc_step, x,
+                               disable_tqdm=True,
+                               tau=cfg.dynamics.time_constant,
+                               eta=cfg.training.learning_rate,
+                               min_timesteps=cfg.dynamics.min_timesteps,
+                               max_timesteps=cfg.dynamics.max_timesteps,
+                               tolerance=cfg.dynamics.convergence_tolerance,
+                               tolerance_style=cfg.dynamics.tolerance_style,
+                               learn=False,
+                               rclamp=y)
+    _, _, learn_timesteps = run(model, pc_step, x,
+                                disable_tqdm=True,
+                                tau=cfg.dynamics.time_constant,
+                                eta=cfg.training.learning_rate,
+                                min_timesteps=1,
+                                max_timesteps=1,
+                                tolerance=cfg.dynamics.convergence_tolerance,
+                                tolerance_style=cfg.dynamics.tolerance_style,
+                                learn=True,
+                                rclamp=y)
+    _, activations, _ = run(model, pc_step, x,
+                            disable_tqdm=True,
+                            tau=cfg.dynamics.time_constant,
+                            eta=cfg.training.learning_rate,
+                            min_timesteps=cfg.dynamics.min_timesteps,
+                            max_timesteps=cfg.dynamics.max_timesteps,
+                            tolerance=cfg.dynamics.convergence_tolerance,
+                            tolerance_style=cfg.dynamics.tolerance_style,
+                            learn=False)
 
     error_val = float(jnp.mean(jnp.linalg.norm(activations[-1][:y.shape[0]] - y, axis=-1)))
+    # Store parameters after the nudge
+    post_nudge_params = get_model_params(model)
+    # Calculate parameter change norm
+    param_change_norm = compute_param_change_norm(pre_nudge_params, post_nudge_params)
 
     wandb.log({
         "epoch": epoch,
         "train/sample": sample_idx,
-        "train/timesteps": learn_timesteps,
-        "train/error": error_val
+        "train/timesteps": conv_timesteps + learn_timesteps,
+        "train/error": error_val,
+        "train/weight_change_norm": float(param_change_norm)
     }, commit=True)
 
     return activations
@@ -123,16 +139,19 @@ def main(cfg):
         activation_fn = nnx.tanh
     else:
         raise ValueError(f"Unknown activation fn: {cfg.model.activation_fn}")
-    if cfg.training.batch_size > 1:
+    if cfg.training.batch_size >= 1:
         with nnx.split_rngs(rngs, splits=cfg.training.batch_size, only="activations"):
             state_axes = nnx.StateAxes({(Activation, "activations"): 0, ...: None})
             model = nnx.vmap(lambda r:
-                MLP(cfg.model.layer_dims, activation_fn=activation_fn, rngs=r),
+                MLP(cfg.model.layer_dims,
+                    activation_fn=activation_fn,
+                    kernel_init_scale=cfg.model.get("kernel_init_scale", 1.0),
+                    rngs=r),
             in_axes=(state_axes,), out_axes=state_axes)(rngs)
     else:
         model = MLP(cfg.model.layer_dims,
                     activation_fn=activation_fn,
-                    batch_size=cfg.training.batch_size,
+                    kernel_init_scale=cfg.model.get("kernel_init_scale", 1.0),
                     rngs=rngs)
 
     transforms = default_data_transforms(cfg.data)

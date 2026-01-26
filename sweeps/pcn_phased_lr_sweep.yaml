@@ -1,0 +1,21 @@
+program: train-pcn.py
+name: pcn_phase_lr_sweep
+method: grid
+parameters:
+  data:
+    value: mnist
+  # use this format for nesting
+  # cause otherwise hydra is confused
+  # (see https://github.com/wandb/wandb/issues/4686#issuecomment-2407556397)
+  training.learning_rate:
+    values: [0.5, 0.1, 0.05, 0.01, 0.001]
+  model.kernel_init_scale:
+    values: [1, 10, 100]
+command:
+- ${env}
+- PYTHONFAULTHANDLER=1
+- XLA_PYTHON_CLIENT_PREALLOCATE=1
+- uv
+- run
+- ${program}
+- ${args_no_hyphens}

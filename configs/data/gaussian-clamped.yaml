@@ -1,0 +1,5 @@
+defaults:
+- gaussian
+
+name: gaussian-clamped
+input_stddev: 1

@@ -1,14 +1,27 @@
+import jax.numpy as jnp
 import jax.random as jrng
 from flax import nnx
+from flax.nnx.nn.initializers import variance_scaling, DtypeLikeInexact
 from typing import Sequence, Callable
 
 class Activation(nnx.Param):
     pass
 
+def lecun_norm_w_scale(scale: float = 1.0,
+                       in_axis: int | Sequence[int] = -2,
+                       out_axis: int | Sequence[int] = -1,
+                       batch_axis: Sequence[int] = (),
+                       dtype: DtypeLikeInexact = jnp.float_):
+    return variance_scaling(scale, "fan_in", "truncated_normal", in_axis=in_axis,
+                            out_axis=out_axis, batch_axis=batch_axis, dtype=dtype)
+
 class MLP(nnx.Module):
     def __init__(self, features: Sequence[int], *, rngs,
-                 batch_size: int = 1, activation_fn: Callable = nnx.tanh):
-        self.layers = [nnx.Linear(fin, fout, use_bias=False, rngs=rngs)
+                 kernel_init_scale: float = 1.0, activation_fn: Callable = nnx.tanh):
+        self.layers = [nnx.Linear(fin, fout,
+                                  use_bias=False,
+                                  kernel_init=lecun_norm_w_scale(scale=kernel_init_scale),
+                                  rngs=rngs)
                        for fin, fout in zip(features[:-1], features[1:])]
         # initialize the neuron activations (pre-nonlinearity)
         self.activations = [Activation(jrng.normal(rngs.activations(), (fout,)))
