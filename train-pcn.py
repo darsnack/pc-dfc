@@ -39,7 +39,7 @@ def run_sample(cfg, x, y, model, epoch, sample_idx):
     wandb.log({
         "epoch": epoch,
         "train/sample": sample_idx,
-        "train/timesteps": conv_timesteps + learn_timesteps,
+        "train/timesteps": learn_timesteps,
         "train/error": error_val
     }, commit=True)
 
