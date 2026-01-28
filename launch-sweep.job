@@ -21,4 +21,5 @@ sbatch\
     --array=0-$((${NJOBS}-1))\
     --job-name=pc-dfc-sweep-${SLURM_SWEEP_ID}\
     --qos=slow_nice\
+    --exclude=bamgpu100,bamgpu101\
     launch-slurm.job "${@:2}"
