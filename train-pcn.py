@@ -95,7 +95,7 @@ def train_epoch(cfg, model, dataset_trn, epoch):
                "train/avg_epoch_error": jnp.mean(jnp.array(epoch_errors)),
                "train/avg_epoch_accuracy": jnp.mean(jnp.array(epoch_accuracies))})
 
-def test_epoch(cfg, model, v_fp, dataset_tst, epoch):
+def test_epoch(cfg, model, v_fp, dataset_tst, epoch, log_group = "test"):
     epoch_errors = []
     epoch_accuracies = []
     for sample_idx, (x, y) in tqdm(enumerate(dataset_tst), desc="testing", position=1, leave=False):
@@ -115,15 +115,15 @@ def test_epoch(cfg, model, v_fp, dataset_tst, epoch):
 
         wandb.log({
             "epoch": epoch,
-            "test/sample": global_sample_idx,
-            "test/total_timesteps_per_sample": timesteps,
-            "test/batch_final_error": error_val,
-            "test/batch_final_accuracy": epoch_accuracies[-1]
+            f"{log_group}/sample": global_sample_idx,
+            f"{log_group}/total_timesteps_per_sample": timesteps,
+            f"{log_group}/batch_final_error": error_val,
+            f"{log_group}/batch_final_accuracy": epoch_accuracies[-1]
         }, commit=(sample_idx < len(dataset_tst) - 1))
 
     wandb.log({"epoch": epoch,
-               "test/avg_epoch_error": jnp.mean(jnp.array(epoch_errors)),
-               "test/avg_epoch_accuracy": jnp.mean(jnp.array(epoch_accuracies))})
+               f"{log_group}/avg_epoch_error": jnp.mean(jnp.array(epoch_errors)),
+               f"{log_group}/avg_epoch_accuracy": jnp.mean(jnp.array(epoch_accuracies))})
 
 @hydra.main(config_path="./configs", config_name="main", version_base=None)
 def main(cfg):
@@ -166,6 +166,7 @@ def main(cfg):
 
     fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
     init_v_fp = initialize_to_fp(cfg, model, fp_input)
+    test_epoch(cfg, model, init_v_fp, trn_loader, 0, log_group="train")
     test_epoch(cfg, model, init_v_fp, tst_loader, 0)
     if cfg.profile:
         with jax.profiler.trace("/tmp/jax-trace", create_perfetto_trace=False):
