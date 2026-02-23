@@ -26,15 +26,19 @@ class Flatten(torch.nn.Module):
         return x.reshape((-1,))
 
 class OneHot(torch.nn.Module):
-    def __init__(self, num_classes):
+    def __init__(self, num_classes, soft_onehot = False):
         super().__init__()
+        self.soft_onehot = soft_onehot
         self.num_classes = num_classes
 
     def forward(self, label):
         if isinstance(label, int):
             label = torch.tensor(label)
 
-        return F.one_hot(label, self.num_classes)
+        if self.soft_onehot:
+            return 0.94 * F.one_hot(label, self.num_classes) + 0.03
+        else:
+            return F.one_hot(label, self.num_classes)
 
 class JaxImageOrder(torch.nn.Module):
     def forward(self, img):
@@ -51,7 +55,7 @@ def default_data_transforms(cfg):
         if cfg.flatten:
             img_transforms.append(Flatten())
 
-        return transforms.Compose(img_transforms), OneHot(10)
+        return transforms.Compose(img_transforms), OneHot(10, soft_onehot=True)
     else:
         return None, None
 

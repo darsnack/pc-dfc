@@ -44,6 +44,9 @@ class MLP(nnx.Module):
 
         return vs[-1] # activated with identity function
 
+    def get_activations(self):
+        return [act.value for act in self.activations]
+
     def set_activations(self, activations):
         for i, act in enumerate(activations):
             self.activations[i].value = act

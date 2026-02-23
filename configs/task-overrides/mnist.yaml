@@ -10,4 +10,4 @@ model:
   activation_fn: noop # noop or tanh
 training:
   batch_size: 1024
-  learning_rate: 1e-4
+  learning_rate: 0.01

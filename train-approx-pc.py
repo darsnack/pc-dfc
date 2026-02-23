@@ -1,8 +1,11 @@
+import os
 import hydra
+from hydra.core.hydra_config import HydraConfig
 import wandb
 import jax
 import jax.numpy as jnp
 import jax.random as jrng
+import orbax.checkpoint as ocp
 from flax import nnx
 from omegaconf import OmegaConf
 from tqdm.auto import tqdm
@@ -10,7 +13,7 @@ from tqdm.auto import tqdm
 from projectlib.models import MLP, Activation
 from projectlib.dynamics import pc_step, current_pc_vjp, approx_pc_step, run
 from projectlib.data import load_dataset, build_dataloader, default_data_transforms
-from projectlib.utils import noop, get_model_params, compute_param_change_norm, accuracy
+from projectlib.utils import noop, get_model_params, compute_param_change_norm, accuracy, save_checkpoint
 
 def runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, sample_idx):
     # Keep nudging toward current sample until convergence
@@ -200,6 +203,13 @@ def main(cfg):
     wandb.init(entity="mitra-ryan-kyle",
                project="pc-dfc",
                config=OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)) # type: ignore
+    hydra_output_dir = HydraConfig.get().runtime.output_dir
+    checkpoint_dir = os.path.join(hydra_output_dir, "checkpoints")
+    checkpoint_manager = ocp.CheckpointManager(
+        checkpoint_dir,
+        item_handlers=ocp.StandardCheckpointHandler(),
+        options=ocp.CheckpointManagerOptions(create=True, max_to_keep=5)
+    )
 
     # Initial test epoch
     fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
@@ -216,6 +226,7 @@ def main(cfg):
                 fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
                 init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
                 test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, epoch)
+                save_checkpoint(checkpoint_manager, model, epoch)
     else:
         for epoch in tqdm(range(1, cfg.training.epochs + 1), desc="epochs", position=0, leave=True):
             # Initialize to a fixed point using random Gaussian input
@@ -226,6 +237,7 @@ def main(cfg):
             fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
             init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
             test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, epoch)
+            save_checkpoint(checkpoint_manager, model, epoch)
 
     # # Log epoch-level summary statistics
     # wandb.log({

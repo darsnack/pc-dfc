@@ -1,8 +1,11 @@
+import os
 import hydra
+from hydra.core.hydra_config import HydraConfig
 import wandb
 import jax
 import jax.numpy as jnp
 import jax.random as jrng
+import orbax.checkpoint as ocp
 from flax import nnx
 from omegaconf import OmegaConf
 from tqdm.auto import tqdm
@@ -12,40 +15,50 @@ from projectlib.dynamics import pc_step, run
 from projectlib.data import load_dataset, build_dataloader, default_data_transforms
 from projectlib.utils import noop, accuracy, get_model_params, compute_param_change_norm
 
-def run_sample(cfg, x, y, model, epoch, sample_idx):
+def save_checkpoint(checkpoint_manager, model, epoch):
+    _, state = nnx.split(model)
+    checkpoint_manager.save(epoch, {"model": state})
+    checkpoint_manager.wait_until_finished()
+
+def load_checkpoint(checkpoint_path, model):
+    checkpoint_manager = ocp.CheckpointManager(
+        checkpoint_path,
+        item_handlers=ocp.StandardCheckpointHandler(),
+        options=ocp.CheckpointManagerOptions(create=False)
+    )
+    latest_step = checkpoint_manager.latest_step()
+    if latest_step is not None:
+        _, abstract_state = nnx.split(model)
+        restored = checkpoint_manager.restore(latest_step, {"model": abstract_state})
+        checkpoint_manager.wait_until_finished()
+        nnx.update(model, restored["model"])
+        return model, latest_step
+    return model, None
+
+def run_sample(cfg, rngs, x, y, model, epoch, sample_idx):
     # Store parameters after the nudge
     pre_nudge_params = get_model_params(model)
-    _, _, conv_timesteps = run(model, pc_step, x,
-                               disable_tqdm=True,
-                               tau=cfg.dynamics.time_constant,
-                               eta=cfg.training.learning_rate,
-                               min_timesteps=cfg.dynamics.min_timesteps,
-                               max_timesteps=cfg.dynamics.max_timesteps,
-                               tolerance=cfg.dynamics.convergence_tolerance,
-                               tolerance_style=cfg.dynamics.tolerance_style,
-                               learn=False,
-                               rclamp=y)
-    _, _, learn_timesteps = run(model, pc_step, x,
-                                disable_tqdm=True,
-                                tau=cfg.dynamics.time_constant,
-                                eta=cfg.training.learning_rate,
-                                min_timesteps=1,
-                                max_timesteps=1,
-                                tolerance=cfg.dynamics.convergence_tolerance,
-                                tolerance_style=cfg.dynamics.tolerance_style,
-                                learn=True,
-                                rclamp=y)
-    _, activations, _ = run(model, pc_step, x,
-                            disable_tqdm=True,
-                            tau=cfg.dynamics.time_constant,
-                            eta=cfg.training.learning_rate,
-                            min_timesteps=cfg.dynamics.min_timesteps,
-                            max_timesteps=cfg.dynamics.max_timesteps,
-                            tolerance=cfg.dynamics.convergence_tolerance,
-                            tolerance_style=cfg.dynamics.tolerance_style,
-                            learn=False)
-
-    error_val = float(jnp.mean(jnp.linalg.norm(activations[-1][:y.shape[0]] - y, axis=-1)))
+    _, _, timesteps = run(model, pc_step, x,
+                          disable_tqdm=True,
+                          tau=cfg.dynamics.time_constant,
+                          eta=cfg.training.learning_rate,
+                          min_timesteps=20,
+                          max_timesteps=20,
+                          tolerance=cfg.dynamics.convergence_tolerance,
+                          tolerance_style=cfg.dynamics.tolerance_style,
+                          learn=False,
+                          rclamp=y)
+    _, _, timesteps = run(model, pc_step, x,
+                          disable_tqdm=True,
+                          tau=100000,
+                          eta=cfg.training.learning_rate,
+                          min_timesteps=1,
+                          max_timesteps=1,
+                          tolerance=cfg.dynamics.convergence_tolerance,
+                          tolerance_style=cfg.dynamics.tolerance_style,
+                          learn=True,
+                          rclamp=y)
+    error_val, activations = test_sample(cfg, rngs, model, x, y)
     # Store parameters after the nudge
     post_nudge_params = get_model_params(model)
     # Calculate parameter change norm
@@ -54,7 +67,7 @@ def run_sample(cfg, x, y, model, epoch, sample_idx):
     wandb.log({
         "epoch": epoch,
         "train/sample": sample_idx,
-        "train/timesteps": conv_timesteps + learn_timesteps,
+        "train/timesteps": timesteps,
         "train/error": error_val,
         "train/weight_change_norm": float(param_change_norm)
     }, commit=True)
@@ -71,7 +84,25 @@ def initialize_to_fp(cfg, model, sample):
     wandb.log({"initial_convergence_timesteps": init_steps})
     return activations
 
-def train_epoch(cfg, model, dataset_trn, epoch):
+def test_sample(cfg, rngs, model, x, y):
+    init_activations = model.get_activations()
+    fp_input = jrng.normal(rngs.train(), x.shape) * 1e-1
+    _ = initialize_to_fp(cfg, model, fp_input)
+    _, activations, _ = run(model, pc_step, x,
+                            disable_tqdm=True,
+                            tau=cfg.dynamics.time_constant,
+                            eta=cfg.training.learning_rate,
+                            min_timesteps=cfg.dynamics.min_timesteps,
+                            max_timesteps=cfg.dynamics.max_timesteps,
+                            tolerance=cfg.dynamics.convergence_tolerance,
+                            tolerance_style=cfg.dynamics.tolerance_style,
+                            learn=False)
+    error_val = float(jnp.mean(jnp.linalg.norm(activations[-1][:y.shape[0]] - y, axis=-1)))
+    model.set_activations(init_activations)
+
+    return error_val, activations
+
+def train_epoch(cfg, rngs, model, dataset_trn, epoch):
     epoch_errors = []
     epoch_accuracies = []
 
@@ -79,7 +110,7 @@ def train_epoch(cfg, model, dataset_trn, epoch):
         global_sample_idx = sample_idx + len(dataset_trn) * epoch
         x, y = jnp.array(x), jnp.array(y)
         v_fp = initialize_to_fp(cfg, model, x)
-        v_fp = run_sample(cfg, x, y, model, epoch, global_sample_idx)
+        v_fp = run_sample(cfg, rngs, x, y, model, epoch, global_sample_idx)
 
         epoch_errors.append(float(jnp.mean(jnp.linalg.norm(v_fp[-1][:y.shape[0]] - y, axis=-1))))
         epoch_accuracies.append(float(accuracy(v_fp[-1][:y.shape[0]], y)))
@@ -163,6 +194,18 @@ def main(cfg):
     wandb.init(entity="mitra-ryan-kyle",
                project="pc-dfc",
                config=OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True))
+    hydra_output_dir = HydraConfig.get().runtime.output_dir
+    checkpoint_dir = os.path.join(hydra_output_dir, "checkpoints")
+    checkpoint_manager = ocp.CheckpointManager(
+        checkpoint_dir,
+        item_handlers=ocp.StandardCheckpointHandler(),
+        options=ocp.CheckpointManagerOptions(create=True, max_to_keep=5)
+    )
+
+    if cfg.checkpointing.load_from is not None:
+        model, loaded_epoch = load_checkpoint(cfg.checkpointing.load_from, model)
+        if loaded_epoch is not None:
+            tqdm.write(f"Loaded checkpoint from epoch {loaded_epoch}")
 
     fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
     init_v_fp = initialize_to_fp(cfg, model, fp_input)
@@ -171,16 +214,18 @@ def main(cfg):
     if cfg.profile:
         with jax.profiler.trace("/tmp/jax-trace", create_perfetto_trace=False):
             for epoch in tqdm(range(1, cfg.training.epochs + 1), desc="epochs", position=0, leave=True):
-                train_epoch(cfg, model, trn_loader, epoch)
+                train_epoch(cfg, rngs, model, trn_loader, epoch)
                 fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
                 init_v_fp = initialize_to_fp(cfg, model, fp_input)
                 test_epoch(cfg, model, init_v_fp, tst_loader, epoch)
+                save_checkpoint(checkpoint_manager, model, epoch)
     else:
         for epoch in tqdm(range(1, cfg.training.epochs + 1), desc="epochs", position=0, leave=True):
-            train_epoch(cfg, model, trn_loader, epoch)
+            train_epoch(cfg, rngs, model, trn_loader, epoch)
             fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
             init_v_fp = initialize_to_fp(cfg, model, fp_input)
             test_epoch(cfg, model, init_v_fp, tst_loader, epoch)
+            save_checkpoint(checkpoint_manager, model, epoch)
 
 
 if __name__ == "__main__":

@@ -43,7 +43,7 @@ def pc_step(model: nnx.Module, x, tau = 1, eta = 1, rclamp = None, learn = False
     new_acts = jtr.map(lambda v, dv: v - dv / tau, acts_state, acts_grads)
     if learn:
         # TODO: should we update avg. across batches??
-        other_state = jtr.map(lambda w, dw: w - eta * jnp.mean(dw), other_state, other_grads)
+        other_state = jtr.map(lambda w, dw: w - eta * jnp.mean(dw, axis=0), other_state, other_grads)
     nnx.update(model, new_acts, other_state)
 
     return total_energy

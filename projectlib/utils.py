@@ -31,3 +31,8 @@ def compute_param_change_norm(old_params, new_params):
     ))
 
     return norm
+
+def save_checkpoint(checkpoint_manager, model, epoch):
+    _, state = nnx.split(model)
+    checkpoint_manager.save(epoch, {"model": state})
+    checkpoint_manager.wait_until_finished()
