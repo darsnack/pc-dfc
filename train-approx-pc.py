@@ -15,13 +15,12 @@ from projectlib.dynamics import pc_step, current_pc_vjp, approx_pc_step, run
 from projectlib.data import load_dataset, build_dataloader, default_data_transforms
 from projectlib.utils import noop, get_model_params, compute_param_change_norm, accuracy, save_checkpoint
 
-def runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, sample_idx):
+def runs_with_nudges(cfg, rngs, x, y, model, v_fp, vjps, epoch, sample_idx):
     # Keep nudging toward current sample until convergence
     nudge_count = 0
     total_timesteps = 0
     while jnp.median(jnp.linalg.norm(v_fp[-1][:y.shape[0]] - y, axis=-1)) > cfg.nudge.convergence_tolerance:
         if nudge_count > cfg.nudge.max_count:
-            # print("Nudge count exceeded maximum")
             break
         # Store parameters before the nudge
         pre_nudge_params = get_model_params(model)
@@ -59,14 +58,9 @@ def runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, sample_idx):
             "train/sample": sample_idx,
             "train/nudge": nudge_count,
             "train/timesteps_per_nudge": timesteps,
-            "train/error": error_val,
+            "train/dist_to_target": error_val,
             "train/weight_change_norm": float(param_change_norm)
         }, commit=(error_val > cfg.nudge.convergence_tolerance))
-
-        # wandb.log({
-        #     "activity/u0/clamp": float(jnp.mean(rclamp,axis=0)[0]),
-        #     "activity/u0/activity": float(jnp.mean(activations[-1],axis=0)[0]),
-        # })
 
         clamp_mean = jnp.mean(rclamp, axis=0)          # (units,)
         act_mean   = jnp.mean(activations[-1], axis=0) # (units,)
@@ -76,7 +70,6 @@ def runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, sample_idx):
             log_dict[f"activity/u{u}/clamp"]    = float(clamp_mean[u])
             log_dict[f"activity/u{u}/activity"] = float(act_mean[u])
         wandb.log(log_dict)
-
 
     return nudge_count, total_timesteps, v_fp, vjps
 
@@ -95,7 +88,26 @@ def initialize_to_fp(cfg, model, sample):
 
     return init_v_fp, init_vjps
 
-def train_epoch(cfg, model, dataset_trn, epoch):
+def test_sample(cfg, rngs, model, x, y):
+    init_activations = model.get_activations()
+    fp_input = jrng.normal(rngs.train(), x.shape) * 1e-1
+    init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
+    _, activations, _ = run(model, approx_pc_step, x,
+                            disable_tqdm=True,
+                            vjps=init_vjps,
+                            tau=cfg.dynamics.time_constant,
+                            eta=cfg.training.learning_rate,
+                            min_timesteps=cfg.dynamics.min_timesteps,
+                            max_timesteps=cfg.dynamics.max_timesteps,
+                            tolerance=cfg.dynamics.convergence_tolerance,
+                            tolerance_style=cfg.dynamics.tolerance_style,
+                            learn=False)
+    error_val = float(jnp.mean(jnp.linalg.norm(activations[-1][:y.shape[0]] - y, axis=-1)))
+    model.set_activations(init_activations)
+
+    return error_val, activations
+
+def train_epoch(cfg, rngs, model, dataset_trn, epoch):
     epoch_nudge_counts = []
     epoch_timestep_counts = []
     epoch_errors = []
@@ -105,13 +117,16 @@ def train_epoch(cfg, model, dataset_trn, epoch):
         global_sample_idx = sample_idx + len(dataset_trn) * epoch
         x, y = jnp.array(x), jnp.array(y)
         v_fp, vjps = initialize_to_fp(cfg, model, x)
-        nudge_count, total_timesteps, v_fp, vjps = runs_with_nudges(cfg, x, y, model, v_fp, vjps, epoch, global_sample_idx)
+        nudge_count, total_timesteps, v_fp, vjps = runs_with_nudges(cfg, rngs, x, y, model, v_fp, vjps, epoch, global_sample_idx)
+
+        # Evaluate using test_sample for comparable metrics
+        error_val, test_activations = test_sample(cfg, rngs, model, x, y)
 
         # Log summary metrics for this sample
         epoch_nudge_counts.append(nudge_count)
         epoch_timestep_counts.append(total_timesteps)
-        epoch_errors.append(float(jnp.mean(jnp.linalg.norm(v_fp[-1][:y.shape[0]] - y, axis=-1))))
-        epoch_accuracies.append(float(accuracy(v_fp[-1][:y.shape[0]], y)))
+        epoch_errors.append(error_val)
+        epoch_accuracies.append(float(accuracy(test_activations[-1][:y.shape[0]], y)))
 
         # Log sample-level metrics to wandb
         wandb.log({
@@ -127,7 +142,7 @@ def train_epoch(cfg, model, dataset_trn, epoch):
                "train/avg_epoch_error": jnp.mean(jnp.array(epoch_errors)),
                "train/avg_epoch_accuracy": jnp.mean(jnp.array(epoch_accuracies))})
 
-def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch):
+def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch, log_group = "test"):
     epoch_errors = []
     epoch_accuracies = []
     for sample_idx, (x, y) in tqdm(enumerate(dataset_tst), desc="testing", position=1, leave=False):
@@ -143,7 +158,6 @@ def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch):
                                         tau=cfg.dynamics.time_constant,
                                         learn=False)
 
-        # Record nudge statistics
         v_fp = activations
         error_val = float(jnp.mean(jnp.linalg.norm(v_fp[-1][:y.shape[0]] - y, axis=-1)))
         epoch_errors.append(error_val)
@@ -152,15 +166,15 @@ def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch):
         # Log sample-level metrics to wandb
         wandb.log({
             "epoch": epoch,
-            "test/sample": global_sample_idx,
-            "test/total_timesteps_per_sample": timesteps,
-            "test/batch_final_error": error_val,
-            "test/batch_final_accuracy": epoch_accuracies[-1]
+            f"{log_group}/sample": global_sample_idx,
+            f"{log_group}/total_timesteps_per_sample": timesteps,
+            f"{log_group}/batch_final_error": error_val,
+            f"{log_group}/batch_final_accuracy": epoch_accuracies[-1]
         }, commit=(sample_idx < len(dataset_tst) - 1))
 
     wandb.log({"epoch": epoch,
-               "test/avg_epoch_error": jnp.mean(jnp.array(epoch_errors)),
-               "test/avg_epoch_accuracy": jnp.mean(jnp.array(epoch_accuracies))})
+               f"{log_group}/avg_epoch_error": jnp.mean(jnp.array(epoch_errors)),
+               f"{log_group}/avg_epoch_accuracy": jnp.mean(jnp.array(epoch_accuracies))})
 
 @hydra.main(config_path="./configs", config_name="main", version_base=None)
 def main(cfg):
@@ -179,17 +193,20 @@ def main(cfg):
         activation_fn = nnx.tanh
     else:
         raise ValueError(f"Unknown activation fn: {cfg.model.activation_fn}")
-    # Vmap over batch_size > 1 so stored activations are appropriately sized
-    if cfg.training.batch_size > 1:
+    # Vmap over batch_size >= 1 so stored activations are appropriately sized
+    if cfg.training.batch_size >= 1:
         with nnx.split_rngs(rngs, splits=cfg.training.batch_size, only="activations"):
             state_axes = nnx.StateAxes({(Activation, "activations"): 0, ...: None})
             model = nnx.vmap(lambda r:
-                MLP(cfg.model.layer_dims, activation_fn=activation_fn, rngs=r),
+                MLP(cfg.model.layer_dims,
+                    activation_fn=activation_fn,
+                    kernel_init_scale=cfg.model.get("kernel_init_scale", 1.0),
+                    rngs=r),
             in_axes=(state_axes,), out_axes=state_axes)(rngs)
     else:
         model = MLP(cfg.model.layer_dims,
                     activation_fn=activation_fn,
-                    batch_size=cfg.training.batch_size,
+                    kernel_init_scale=cfg.model.get("kernel_init_scale", 1.0),
                     rngs=rngs)
 
     # Load datasets
@@ -214,42 +231,23 @@ def main(cfg):
     # Initial test epoch
     fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
     init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
+    test_epoch(cfg, model, init_v_fp, init_vjps, trn_loader, 0, log_group="train")
     test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, 0)
     if cfg.profile:
         with jax.profiler.trace("/tmp/jax-trace", create_perfetto_trace=False):
             for epoch in tqdm(range(1, cfg.training.epochs + 1), desc="epochs", position=0, leave=True):
-                # Initialize to a fixed point using random Gaussian input
-                # (think about this deeper later)
-                # fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
-                # init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
-                train_epoch(cfg, model, trn_loader, epoch)
+                train_epoch(cfg, rngs, model, trn_loader, epoch)
                 fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
                 init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
                 test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, epoch)
                 save_checkpoint(checkpoint_manager, model, epoch)
     else:
         for epoch in tqdm(range(1, cfg.training.epochs + 1), desc="epochs", position=0, leave=True):
-            # Initialize to a fixed point using random Gaussian input
-            # (think about this deeper later)
-            # fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
-            # init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
-            train_epoch(cfg, model, trn_loader, epoch)
+            train_epoch(cfg, rngs, model, trn_loader, epoch)
             fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
             init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
             test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, epoch)
             save_checkpoint(checkpoint_manager, model, epoch)
-
-    # # Log epoch-level summary statistics
-    # wandb.log({
-    #     "epoch": epoch,
-    #     "avg_nudges_per_sample": sum(epoch_nudge_counts) / len(epoch_nudge_counts),
-    #     "max_nudges": max(epoch_nudge_counts),
-    #     "avg_timesteps_per_sample": sum(epoch_timestep_counts) / len(epoch_timestep_counts),
-    #     "max_timesteps": max(epoch_timestep_counts),
-    #     "avg_final_error": sum(epoch_errors) / len(epoch_errors)
-    # })
-
-    # wandb.finish()
 
 
 if __name__ == "__main__":
