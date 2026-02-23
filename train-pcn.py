@@ -38,26 +38,38 @@ def load_checkpoint(checkpoint_path, model):
 def run_sample(cfg, rngs, x, y, model, epoch, sample_idx):
     # Store parameters after the nudge
     pre_nudge_params = get_model_params(model)
-    _, _, timesteps = run(model, pc_step, x,
-                          disable_tqdm=True,
-                          tau=cfg.dynamics.time_constant,
-                          eta=cfg.training.learning_rate,
-                          min_timesteps=20,
-                          max_timesteps=20,
-                          tolerance=cfg.dynamics.convergence_tolerance,
-                          tolerance_style=cfg.dynamics.tolerance_style,
-                          learn=False,
-                          rclamp=y)
-    _, _, timesteps = run(model, pc_step, x,
-                          disable_tqdm=True,
-                          tau=100000,
-                          eta=cfg.training.learning_rate,
-                          min_timesteps=1,
-                          max_timesteps=1,
-                          tolerance=cfg.dynamics.convergence_tolerance,
-                          tolerance_style=cfg.dynamics.tolerance_style,
-                          learn=True,
-                          rclamp=y)
+    if cfg.dynamics.sync_updates:
+        _, _, timesteps = run(model, pc_step, x,
+                              disable_tqdm=True,
+                              tau=cfg.dynamics.time_constant,
+                              eta=cfg.training.learning_rate,
+                              min_timesteps=cfg.dynamics.min_timesteps,
+                              max_timesteps=cfg.dynamics.max_timesteps,
+                              tolerance=cfg.dynamics.convergence_tolerance,
+                              tolerance_style=cfg.dynamics.tolerance_style,
+                              learn=True,
+                              rclamp=y)
+    else:
+        _, _, timesteps = run(model, pc_step, x,
+                              disable_tqdm=True,
+                              tau=cfg.dynamics.time_constant,
+                              eta=cfg.training.learning_rate,
+                              min_timesteps=20,
+                              max_timesteps=20,
+                              tolerance=cfg.dynamics.convergence_tolerance,
+                              tolerance_style=cfg.dynamics.tolerance_style,
+                              learn=False,
+                              rclamp=y)
+        _, _, timesteps = run(model, pc_step, x,
+                              disable_tqdm=True,
+                              tau=100000,
+                              eta=cfg.training.learning_rate,
+                              min_timesteps=1,
+                              max_timesteps=1,
+                              tolerance=cfg.dynamics.convergence_tolerance,
+                              tolerance_style=cfg.dynamics.tolerance_style,
+                              learn=True,
+                              rclamp=y)
     error_val, activations = test_sample(cfg, rngs, model, x, y)
     # Store parameters after the nudge
     post_nudge_params = get_model_params(model)

@@ -9,6 +9,7 @@ dynamics:
   max_timesteps: 5000
   convergence_tolerance: 1e-5
   tolerance_style: norm
+  sync_updates: true
 nudge:
   max_count: 100
   convergence_tolerance: 1e-5
