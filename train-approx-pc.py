@@ -156,6 +156,10 @@ def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch, log_group = "test"):
                                         disable_tqdm=True,
                                         vjps=vjps,
                                         tau=cfg.dynamics.time_constant,
+                                        min_timesteps=cfg.dynamics.min_timesteps,
+                                        max_timesteps=cfg.dynamics.max_timesteps,
+                                        tolerance=cfg.dynamics.convergence_tolerance,
+                                        tolerance_style=cfg.dynamics.tolerance_style,
                                         learn=False)
 
         v_fp = activations
