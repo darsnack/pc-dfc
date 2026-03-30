@@ -1,0 +1,22 @@
+seed: 10
+model:
+  input_dim: 1
+  hidden_dims: [8, 6, 4]
+  output_dim: 1
+  activation_fn: identity # identity, noop, tanh, relu
+  kernel_init_scale: 1.0
+dynamics:
+  time_constant: 10.0
+  free_min_timesteps: 10
+  free_max_timesteps: 2000
+  clamp_timesteps: 1000
+  convergence_tolerance: 1e-9
+approx_pc:
+  k: 1.0
+experiment:
+  noise_sweep: [0.1, 0.5, 1.0, 10.0, 50.0]
+dpi: 150
+# hydra change working directory
+hydra:
+  job:
+    chdir: true

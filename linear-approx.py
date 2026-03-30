@@ -7,303 +7,350 @@ Procedure:
   3. Sweep over noise magnitudes; for each, clamp the output to
      fp_output + noise_direction * magnitude and run both networks.
   4. Plots
-       dynamics_layer{l}.png  — per-neuron time series, rows = noise levels
-       dynamics_pca.png       — PC1/PC2 trajectories,  rows = noise levels
-       dynamics_heatmap.png   — layer × noise heatmap of PCN vs approx-PC error
+       dynamics_layer{l}.png  -- per-neuron time series, rows = noise levels
+       dynamics_pca.png       -- PC1/PC2 trajectories, rows = noise levels
+       dynamics_heatmap.png   -- layer x noise heatmap of PCN vs approx-PC error
 """
 
-import argparse
-import numpy as np
+import hydra
 import jax.numpy as jnp
 import jax.random as jrng
 import matplotlib.pyplot as plt
-from matplotlib.collections import LineCollection
+import numpy as np
 from flax import nnx
+from matplotlib.collections import LineCollection
+from functools import partial
+from pathlib import Path
 
+from projectlib.dynamics import approx_pc_step, current_pc_vjp, pc_step, run
 from projectlib.models import MLP
-from projectlib.dynamics import pc_step, approx_pc_step, current_pc_vjp, run
 from projectlib.utils import noop
 
-# ── CLI ───────────────────────────────────────────────────────────────────
-parser = argparse.ArgumentParser(description="Compare PCN vs approx-PC dynamics.")
-parser.add_argument(
-    "--hidden", type=int, nargs="+", default=[8, 6, 4],
-    metavar="N",
-    help="Hidden layer widths (default: 8 6 4)",
-)
-parser.add_argument("--seed",        type=int,   default=10)
-parser.add_argument("--tau",         type=float, default=10.0)
-parser.add_argument("--k",           type=float, default=1.0)
-parser.add_argument("--clamp-steps", type=int,   default=1000)
-parser.add_argument(
-    "--activation", default="identity",
-    choices=["identity", "tanh", "relu"],
-    help="Hidden-layer activation function (default: identity)",
-)
-parser.add_argument(
-    "--noise-sweep", type=float, nargs="+",
-    default=[0.1, 0.5, 1.0, 10.0, 50.0],
-    metavar="N",
-    help="Noise magnitudes to sweep (default: 0.1 0.5 1.0 10.0 50.0)",
-)
-args = parser.parse_args()
+def fit_pca(traj_a, traj_b):
+    """Fit PCA basis on two trajectories; return a project() fn and n_components."""
+    combined = np.concatenate([traj_a, traj_b], axis=0)
+    mean = combined.mean(axis=0)
+    n_dim = combined.shape[1]
+    n_components = min(2, n_dim)
 
-# ── Config ────────────────────────────────────────────────────────────────
-SEED         = args.seed
-LAYER_DIMS   = [1, *args.hidden, 1]
-TAU          = args.tau
-K            = args.k
-NOISE_MAGS   = args.noise_sweep
-FREE_MIN     = 10
-FREE_MAX     = 2000
-CLAMP_STEPS  = args.clamp_steps
-TOLERANCE    = 1e-9
-N_NOISE      = len(NOISE_MAGS)
-N_LAYERS     = len(LAYER_DIMS) - 1   # number of post-input layers
+    if n_dim == 1:
+        def project(t):
+            return np.column_stack([t - mean, np.zeros(len(t))])
+    else:
+        _, _, v_t = np.linalg.svd(combined - mean, full_matrices=False)
+        components = v_t[:n_components]
+        def project(t):
+            return (np.array(t) - mean) @ components.T
 
-ACTIVATION_FNS = {"identity": noop, "tanh": nnx.tanh, "relu": nnx.relu}
-activation_fn  = ACTIVATION_FNS[args.activation]
+    return project, n_components
 
-layer_labels = (
-    [f"Hidden {1}  (n={LAYER_DIMS[1]})"]
-    + [f"Hidden {i+2}  (n={LAYER_DIMS[i+2]})" for i in range(len(LAYER_DIMS) - 3)]
-    + [f"Output  (n={LAYER_DIMS[-1]})"]
-)
+def gradient_lc(ax, proj, cmap_name):
+    """Draw a time-coloured LineCollection on ax; return handle for legend."""
+    segs = np.concatenate([proj[:-1, np.newaxis], proj[1:, np.newaxis]], axis=1)
+    cmap = plt.get_cmap(cmap_name)
+    colors = cmap(0.35 + 0.65 * np.linspace(0, 1, len(segs)))
+    lc = LineCollection(segs, colors=colors, lw=1.8, zorder=2)
+    ax.add_collection(lc)
+    handle, = ax.plot([], [], color=cmap(0.7), lw=1.8)
+    ax.scatter(proj[0, 0], proj[0, 1],
+               marker="o",
+               s=50,
+               color=cmap(0.4),
+               zorder=5,
+               edgecolors="k",
+               lw=0.4)
+    ax.scatter(proj[-1, 0], proj[-1, 1],
+               marker="+",
+               s=100,
+               color=cmap(0.9),
+               zorder=5,
+               lw=1.5)
 
-# ── Build model & random input ────────────────────────────────────────────
-rngs  = nnx.Rngs(SEED, params=SEED + 1, activations=SEED + 2)
-model = MLP(LAYER_DIMS, activation_fn=activation_fn, rngs=rngs)
-
-rng = jrng.PRNGKey(SEED)
-rng, rng_x, rng_n = jrng.split(rng, 3)
-x = jrng.normal(rng_x, (1,))
-
-# ── Phase 1 – free phase → fixed point ───────────────────────────────────
-_, free_hist, T_free = run(
-    model, pc_step, x,
-    min_timesteps=FREE_MIN, max_timesteps=FREE_MAX,
-    tolerance=TOLERANCE, tau=TAU,
-    learn=False, return_act_history=True,
-)
-print(f"Free-phase converged in {T_free} steps.")
-
-fp_acts   = model.get_activations()
-graph_def, fp_state = nnx.split(model)
-
-# Fixed noise direction; magnitude is varied in the sweep
-noise_dir = jrng.normal(rng_n, fp_acts[-1].shape)
-noise_dir = noise_dir / jnp.linalg.norm(noise_dir)   # unit vector
-
-# VJPs are the same for every noise level (fixed point & weights don't change)
-_tmp = nnx.merge(graph_def, fp_state)
-vjps = current_pc_vjp(_tmp, x)
-
-def approx_step(model, x, **kwargs):
-    return approx_pc_step(model, x, vjps, k=K, **kwargs)
+    return handle
 
 def concat(free, clamped):
     """Stitch free-phase and clamped-phase histories (drop duplicate junction)."""
     return jnp.concatenate([free, clamped[1:]], axis=0)
 
-# ── Phase 2 – sweep over noise magnitudes ────────────────────────────────
-sweep_pcn_clamp    = []   # [N_NOISE][N_LAYERS]  arrays [T+1, n]
-sweep_approx_clamp = []
-sweep_pcn_full     = []   # free + clamped stitched
-sweep_approx_full  = []
-diff_matrix        = np.zeros((N_NOISE, N_LAYERS))   # for heatmap
+@hydra.main(config_path="./configs", config_name="linear-approx", version_base=None)
+def main(cfg):
+    layer_dims = [cfg.model.input_dim, *cfg.model.hidden_dims, cfg.model.output_dim]
+    n_layers = len(layer_dims) - 1
+    n_noise = len(cfg.experiment.noise_sweep)
 
-for ni, mag in enumerate(NOISE_MAGS):
-    rclamp = fp_acts[-1] + noise_dir * mag
-
-    pcn_model    = nnx.merge(graph_def, fp_state)
-    approx_model = nnx.merge(graph_def, fp_state)
-
-    _, pcn_ch, _ = run(
-        pcn_model, pc_step, x,
-        min_timesteps=CLAMP_STEPS, max_timesteps=CLAMP_STEPS,
-        tolerance=TOLERANCE, tau=TAU,
-        learn=False, rclamp=rclamp, return_act_history=True,
-    )
-    _, approx_ch, _ = run(
-        approx_model, approx_step, x,
-        min_timesteps=CLAMP_STEPS, max_timesteps=CLAMP_STEPS,
-        tolerance=TOLERANCE, tau=TAU,
-        learn=False, rclamp=rclamp, return_act_history=True,
-    )
-
-    sweep_pcn_clamp.append([np.array(h) for h in pcn_ch])
-    sweep_approx_clamp.append([np.array(h) for h in approx_ch])
-    sweep_pcn_full.append([concat(f, c) for f, c in zip(free_hist, pcn_ch)])
-    sweep_approx_full.append([concat(f, c) for f, c in zip(free_hist, approx_ch)])
-
-    for l in range(N_LAYERS):
-        diff_matrix[ni, l] = np.linalg.norm(
-            sweep_pcn_clamp[-1][l][-1] - sweep_approx_clamp[-1][l][-1]
+    activation_fns = {
+        "identity": noop,
+        "noop": noop,
+        "tanh": nnx.tanh,
+        "relu": nnx.relu,
+    }
+    if cfg.model.activation_fn not in activation_fns:
+        allowed = ", ".join(sorted(activation_fns.keys()))
+        raise ValueError(
+            f"Unknown activation fn: {cfg.model.activation_fn}. Expected one of: {allowed}."
         )
-        # diff_matrix[ni, l] = np.linalg.norm(
-        #     sweep_pcn_clamp[-1][l][-1] - sweep_approx_clamp[-1][l][-1]
-        # ) / max(np.linalg.norm(sweep_pcn_clamp[-1][l][-1]), np.finfo(float).eps)
+    activation_fn = activation_fns[cfg.model.activation_fn]
 
-    print(f"  noise={mag:.2f}  |  layer diffs: "
-          + "  ".join(f"L{l+1}={diff_matrix[ni,l]:.4f}" for l in range(N_LAYERS)))
+    layer_labels = (
+        [f"Hidden 1  (n={layer_dims[1]})"]
+        + [f"Hidden {i + 2}  (n={layer_dims[i + 2]})" for i in range(len(layer_dims) - 3)]
+        + [f"Output  (n={layer_dims[-1]})"]
+    )
 
-t_axis  = np.arange(sweep_pcn_full[0][0].shape[0])
-t_clamp = T_free
+    rngs = nnx.Rngs(cfg.seed, params=cfg.seed + 1, activations=cfg.seed + 2)
+    model = MLP(layer_dims,
+                kernel_init_scale=cfg.model.kernel_init_scale,
+                activation_fn=activation_fn,
+                rngs=rngs)
 
-# ── helpers ───────────────────────────────────────────────────────────────
-def fit_pca(traj_a, traj_b):
-    """Fit PCA basis on two trajectories; return a project() fn and n_components."""
-    combined = np.concatenate([traj_a, traj_b], axis=0)
-    mean     = combined.mean(axis=0)
-    n_dim    = combined.shape[1]
-    k        = min(2, n_dim)
-    if n_dim == 1:
-        project = lambda t: np.column_stack([t - mean, np.zeros(len(t))])
-        return project, k
-    _, _, Vt   = np.linalg.svd(combined - mean, full_matrices=False)
-    components = Vt[:k]
-    project    = lambda t: (np.array(t) - mean) @ components.T
-    return project, k
+    rng = jrng.PRNGKey(cfg.seed)
+    rng, rng_x, rng_n = jrng.split(rng, 3)
+    x = jrng.normal(rng_x, (cfg.model.input_dim,))
 
-def gradient_lc(ax, proj, cmap_name):
-    """Draw a time-coloured LineCollection on ax; return handle for legend."""
-    segs   = np.concatenate([proj[:-1, np.newaxis], proj[1:, np.newaxis]], axis=1)
-    cmap   = plt.get_cmap(cmap_name)
-    colors = cmap(0.35 + 0.65 * np.linspace(0, 1, len(segs)))
-    lc     = LineCollection(segs, colors=colors, lw=1.8, zorder=2)
-    ax.add_collection(lc)
-    handle, = ax.plot([], [], color=cmap(0.7), lw=1.8)   # legend proxy
-    ax.scatter(proj[0, 0],  proj[0, 1],  marker="o", s=50,
-               color=cmap(0.4), zorder=5, edgecolors="k", lw=0.4)
-    ax.scatter(proj[-1, 0], proj[-1, 1], marker="+", s=100,
-               color=cmap(0.9), zorder=5, lw=1.5)
-    return handle
+    _, free_hist, t_free = run(
+        model,
+        pc_step,
+        x,
+        min_timesteps=cfg.dynamics.free_min_timesteps,
+        max_timesteps=cfg.dynamics.free_max_timesteps,
+        tolerance=cfg.dynamics.convergence_tolerance,
+        tau=cfg.dynamics.time_constant,
+        learn=False,
+        return_act_history=True,
+    )
+    print(f"Free-phase converged in {t_free} steps.")
 
-# ── Plot 1 – per-neuron time series (rows = noise, cols = neurons) ────────
-for l in range(N_LAYERS):
-    n_neurons = sweep_pcn_full[0][l].shape[1]
-    fig, axes = plt.subplots(
-        N_NOISE, n_neurons,
-        figsize=(max(2.8 * n_neurons, 4), 2.5 * N_NOISE),
-        sharex=True, sharey="row",
+    fp_acts = model.get_activations()
+    graph_def, fp_state = nnx.split(model)
+
+    noise_dir = jrng.normal(rng_n, fp_acts[-1].shape)
+    noise_dir = noise_dir / jnp.linalg.norm(noise_dir)
+
+    tmp_model = nnx.merge(graph_def, fp_state)
+    vjps = current_pc_vjp(tmp_model, x)
+    approx_step = partial(approx_pc_step, vjps=vjps, k=cfg.approx_pc.k)
+
+    sweep_pcn_clamp = []
+    sweep_approx_clamp = []
+    sweep_pcn_full = []
+    sweep_approx_full = []
+    diff_matrix = np.zeros((n_noise, n_layers))
+
+    for noise_idx, magnitude in enumerate(cfg.experiment.noise_sweep):
+        rclamp = fp_acts[-1] + noise_dir * magnitude
+
+        pcn_model = nnx.merge(graph_def, fp_state)
+        approx_model = nnx.merge(graph_def, fp_state)
+
+        _, pcn_ch, _ = run(
+            pcn_model,
+            pc_step,
+            x,
+            min_timesteps=cfg.dynamics.clamp_timesteps,
+            max_timesteps=cfg.dynamics.clamp_timesteps,
+            tolerance=cfg.dynamics.convergence_tolerance,
+            tau=cfg.dynamics.time_constant,
+            learn=False,
+            rclamp=rclamp,
+            return_act_history=True,
+        )
+        _, approx_ch, _ = run(
+            approx_model,
+            approx_step,
+            x,
+            min_timesteps=cfg.dynamics.clamp_timesteps,
+            max_timesteps=cfg.dynamics.clamp_timesteps,
+            tolerance=cfg.dynamics.convergence_tolerance,
+            tau=cfg.dynamics.time_constant,
+            learn=False,
+            rclamp=rclamp,
+            return_act_history=True,
+        )
+
+        sweep_pcn_clamp.append([np.array(h) for h in pcn_ch])
+        sweep_approx_clamp.append([np.array(h) for h in approx_ch])
+        sweep_pcn_full.append([concat(f, c) for f, c in zip(free_hist, pcn_ch)])
+        sweep_approx_full.append([concat(f, c) for f, c in zip(free_hist, approx_ch)])
+
+        for layer_idx in range(n_layers):
+            diff_matrix[noise_idx, layer_idx] = np.linalg.norm(
+                sweep_pcn_clamp[-1][layer_idx][-1]
+                - sweep_approx_clamp[-1][layer_idx][-1]
+            )
+
+        print(
+            f"  noise={magnitude:.2f}  |  layer diffs: "
+            + "  ".join(
+                f"L{layer_idx + 1}={diff_matrix[noise_idx, layer_idx]:.4f}"
+                for layer_idx in range(n_layers)
+            )
+        )
+
+    t_axis = np.arange(sweep_pcn_full[0][0].shape[0])
+    t_clamp = t_free
+
+    for layer_idx in range(n_layers):
+        n_neurons = sweep_pcn_full[0][layer_idx].shape[1]
+        fig, axes = plt.subplots(
+            n_noise,
+            n_neurons,
+            figsize=(max(2.8 * n_neurons, 4), 2.5 * n_noise),
+            sharex=True,
+            sharey="row",
+            squeeze=False,
+        )
+        fig.suptitle(layer_labels[layer_idx], fontsize=13, fontweight="bold")
+
+        for noise_idx, magnitude in enumerate(cfg.experiment.noise_sweep):
+            pcn_acts = sweep_pcn_full[noise_idx][layer_idx]
+            approx_acts = sweep_approx_full[noise_idx][layer_idx]
+            rclamp_val = float(fp_acts[-1][0]) + float(noise_dir[0]) * magnitude
+
+            for neuron_idx in range(n_neurons):
+                ax = axes[noise_idx, neuron_idx]
+                ax.plot(
+                    t_axis,
+                    pcn_acts[:, neuron_idx],
+                    color="steelblue",
+                    lw=1.2,
+                    label="PCN",
+                )
+                ax.plot(
+                    t_axis,
+                    approx_acts[:, neuron_idx],
+                    color="darkorange",
+                    lw=1.2,
+                    ls="--",
+                    label="approx-PC",
+                )
+                ax.axvline(t_clamp, color="gray", ls=":", lw=0.8)
+                if layer_idx == n_layers - 1:
+                    ax.axhline(
+                        rclamp_val,
+                        color="crimson",
+                        ls="--",
+                        lw=0.9,
+                        alpha=0.8,
+                    )
+                if noise_idx == 0:
+                    ax.set_title(f"neuron {neuron_idx}", fontsize=8)
+                if neuron_idx == 0:
+                    ax.set_ylabel(f"noise\n{magnitude:.2f}", fontsize=7)
+                if noise_idx == n_noise - 1:
+                    ax.set_xlabel("timestep", fontsize=7)
+                if noise_idx == 0 and neuron_idx == n_neurons - 1:
+                    ax.legend(fontsize=6, loc="best")
+
+        plt.tight_layout()
+        out = Path.cwd() / f"dynamics_layer{layer_idx + 1}.png"
+        plt.savefig(out, dpi=cfg.dpi)
+        print(f"Saved {out}")
+        plt.close(fig)
+
+    pca_fns = [
+        fit_pca(sweep_pcn_clamp[0][layer_idx], sweep_approx_clamp[0][layer_idx])
+        for layer_idx in range(n_layers)
+    ]
+
+    pca_limits = []
+    for layer_idx in range(n_layers):
+        project, _ = pca_fns[layer_idx]
+        all_pts = np.concatenate(
+            [
+                project(sweep_pcn_clamp[noise_idx][layer_idx])[:, :2]
+                for noise_idx in range(n_noise)
+            ]
+            + [
+                project(sweep_approx_clamp[noise_idx][layer_idx])[:, :2]
+                for noise_idx in range(n_noise)
+            ],
+            axis=0,
+        )
+        pad = (all_pts.max() - all_pts.min()) * 0.05 + 1e-6
+        pca_limits.append(
+            (
+                all_pts[:, 0].min() - pad,
+                all_pts[:, 0].max() + pad,
+                all_pts[:, 1].min() - pad,
+                all_pts[:, 1].max() + pad,
+            )
+        )
+
+    fig_pca, axes_pca = plt.subplots(
+        n_noise,
+        n_layers,
+        figsize=(4.5 * n_layers, 4.0 * n_noise),
         squeeze=False,
     )
-    fig.suptitle(layer_labels[l], fontsize=13, fontweight="bold")
+    fig_pca.suptitle("Clamped-phase dynamics -- PC1 vs PC2", fontsize=13, fontweight="bold")
 
-    for ni, mag in enumerate(NOISE_MAGS):
-        pcn_acts    = sweep_pcn_full[ni][l]
-        approx_acts = sweep_approx_full[ni][l]
-        rclamp_val  = float(fp_acts[-1][0]) + float(noise_dir[0]) * mag
-
-        for i in range(n_neurons):
-            ax = axes[ni, i]
-            ax.plot(t_axis, pcn_acts[:, i],    color="steelblue",  lw=1.2, label="PCN")
-            ax.plot(t_axis, approx_acts[:, i], color="darkorange", lw=1.2, ls="--", label="approx-PC")
-            ax.axvline(t_clamp, color="gray", ls=":", lw=0.8)
-            if l == N_LAYERS - 1:   # output layer: show target
-                ax.axhline(rclamp_val, color="crimson", ls="--", lw=0.9, alpha=0.8)
-            if ni == 0:
-                ax.set_title(f"neuron {i}", fontsize=8)
-            if i == 0:
-                ax.set_ylabel(f"noise\n{mag:.2f}", fontsize=7)
-            if ni == N_NOISE - 1:
-                ax.set_xlabel("timestep", fontsize=7)
-            if ni == 0 and i == n_neurons - 1:
-                ax.legend(fontsize=6, loc="best")
+    for noise_idx, magnitude in enumerate(cfg.experiment.noise_sweep):
+        for layer_idx in range(n_layers):
+            ax = axes_pca[noise_idx, layer_idx]
+            project, n_components = pca_fns[layer_idx]
+            pcn_proj = project(sweep_pcn_clamp[noise_idx][layer_idx])[:, :2]
+            approx_proj = project(sweep_approx_clamp[noise_idx][layer_idx])[:, :2]
+            h_pcn = gradient_lc(ax, pcn_proj, "Blues")
+            h_approx = gradient_lc(ax, approx_proj, "Oranges")
+            xmin, xmax, ymin, ymax = pca_limits[layer_idx]
+            ax.set_xlim(xmin, xmax)
+            ax.set_ylim(ymin, ymax)
+            ax.set_aspect("equal")
+            ax.set_xlabel("PC 1", fontsize=7)
+            if noise_idx == 0:
+                ax.set_title(layer_labels[layer_idx], fontsize=9)
+            if layer_idx == 0:
+                ax.set_ylabel(f"noise={magnitude:.2f}\nPC 2", fontsize=7)
+            else:
+                ax.set_ylabel("PC 2" if n_components >= 2 else "(1-D)", fontsize=7)
+            if noise_idx == 0 and layer_idx == n_layers - 1:
+                ax.legend([h_pcn, h_approx], ["PCN", "approx-PC"], fontsize=7)
 
     plt.tight_layout()
-    out = f"dynamics_layer{l + 1}.png"
-    plt.savefig(out, dpi=150)
-    print(f"Saved {out}")
-    plt.close(fig)
+    out_pca = Path.cwd() / "dynamics_pca.png"
+    fig_pca.savefig(out_pca, dpi=cfg.dpi)
+    print(f"Saved {out_pca}")
+    plt.close(fig_pca)
 
-# ── Plot 2 – PCA (rows = noise, cols = layers) ───────────────────────────
-# Fit one PCA basis per layer using the first noise level; reuse for all rows
-# so trajectories share the same axes and the fixed point is always at the origin.
-pca_fns = [
-    fit_pca(sweep_pcn_clamp[0][l], sweep_approx_clamp[0][l])
-    for l in range(N_LAYERS)
-]
+    fig_hm, ax_hm = plt.subplots(
+        figsize=(max(3, 1.2 * n_layers), max(3, 1.0 * n_noise))
+    )
 
-# Compute shared axis limits per layer across all noise levels
-pca_limits = []
-for l in range(N_LAYERS):
-    project, _ = pca_fns[l]
-    all_pts = np.concatenate([
-        project(sweep_pcn_clamp[ni][l])[:, :2]
-        for ni in range(N_NOISE)
-    ] + [
-        project(sweep_approx_clamp[ni][l])[:, :2]
-        for ni in range(N_NOISE)
-    ], axis=0)
-    pad = (all_pts.max() - all_pts.min()) * 0.05 + 1e-6
-    pca_limits.append((all_pts[:, 0].min() - pad, all_pts[:, 0].max() + pad,
-                       all_pts[:, 1].min() - pad, all_pts[:, 1].max() + pad))
+    im = ax_hm.imshow(
+        diff_matrix,
+        aspect="auto",
+        cmap="viridis",
+        origin="lower",
+    )
+    fig_hm.colorbar(im, ax=ax_hm, label="||PCN - approx-PC||")
 
-fig_pca, axes_pca = plt.subplots(
-    N_NOISE, N_LAYERS,
-    figsize=(4.5 * N_LAYERS, 4.0 * N_NOISE),
-    squeeze=False,
-)
-fig_pca.suptitle("Clamped-phase dynamics — PC1 vs PC2", fontsize=13, fontweight="bold")
+    ax_hm.set_xticks(range(n_layers))
+    ax_hm.set_xticklabels([f"L{layer_idx + 1}" for layer_idx in range(n_layers)], fontsize=9)
+    ax_hm.set_yticks(range(n_noise))
+    ax_hm.set_yticklabels([f"{mag:.2f}" for mag in cfg.experiment.noise_sweep], fontsize=9)
+    ax_hm.set_xlabel("Layer", fontsize=10)
+    ax_hm.set_ylabel("Noise magnitude", fontsize=10)
+    ax_hm.set_title("Final activation error: PCN vs approx-PC", fontsize=11, fontweight="bold")
 
-for ni, mag in enumerate(NOISE_MAGS):
-    for l in range(N_LAYERS):
-        ax = axes_pca[ni, l]
-        project, k = pca_fns[l]
-        pcn_p    = project(sweep_pcn_clamp[ni][l])[:, :2]
-        approx_p = project(sweep_approx_clamp[ni][l])[:, :2]
-        h_pcn    = gradient_lc(ax, pcn_p,    "Blues")
-        h_approx = gradient_lc(ax, approx_p, "Oranges")
-        xmin, xmax, ymin, ymax = pca_limits[l]
-        ax.set_xlim(xmin, xmax)
-        ax.set_ylim(ymin, ymax)
-        ax.set_aspect("equal")
-        ax.set_xlabel("PC 1", fontsize=7)
-        if ni == 0:
-            ax.set_title(layer_labels[l], fontsize=9)
-        if l == 0:
-            ax.set_ylabel(f"noise={mag:.2f}\nPC 2", fontsize=7)
-        else:
-            ax.set_ylabel("PC 2" if k >= 2 else "(1-D)", fontsize=7)
-        if ni == 0 and l == N_LAYERS - 1:
-            ax.legend([h_pcn, h_approx], ["PCN", "approx-PC"], fontsize=7)
+    for noise_idx in range(n_noise):
+        for layer_idx in range(n_layers):
+            value = diff_matrix[noise_idx, layer_idx]
+            ax_hm.text(
+                layer_idx,
+                noise_idx,
+                f"{value:.3f}",
+                ha="center",
+                va="center",
+                fontsize=7,
+                color="white" if value > diff_matrix.max() * 0.5 else "black",
+            )
 
-plt.tight_layout()
-out_pca = "dynamics_pca.png"
-fig_pca.savefig(out_pca, dpi=150)
-print(f"Saved {out_pca}")
-plt.close(fig_pca)
+    plt.tight_layout()
+    out_hm = Path.cwd() / "dynamics_heatmap.png"
+    fig_hm.tight_layout()
+    fig_hm.savefig(out_hm, dpi=cfg.dpi)
+    print(f"Saved {out_hm}")
+    plt.close(fig_hm)
 
-# ── Plot 3 – heatmap: layer × noise ──────────────────────────────────────
-fig_hm, ax_hm = plt.subplots(figsize=(max(3, 1.2 * N_LAYERS), max(3, 1.0 * N_NOISE)))
-
-im = ax_hm.imshow(
-    diff_matrix,
-    aspect="auto",
-    cmap="viridis",
-    origin="lower",
-)
-fig_hm.colorbar(im, ax=ax_hm, label="‖PCN − approx-PC‖")
-
-ax_hm.set_xticks(range(N_LAYERS))
-ax_hm.set_xticklabels([f"L{l+1}" for l in range(N_LAYERS)], fontsize=9)
-ax_hm.set_yticks(range(N_NOISE))
-ax_hm.set_yticklabels([f"{m:.2f}" for m in NOISE_MAGS], fontsize=9)
-ax_hm.set_xlabel("Layer", fontsize=10)
-ax_hm.set_ylabel("Noise magnitude", fontsize=10)
-# ax_hm.set_title("Final activation error: PCN vs approx-PC", fontsize=11, fontweight="bold")
-
-# annotate cells
-for ni in range(N_NOISE):
-    for l in range(N_LAYERS):
-        ax_hm.text(l, ni, f"{diff_matrix[ni, l]:.3f}",
-                   ha="center", va="center", fontsize=7,
-                   color="white" if diff_matrix[ni, l] > diff_matrix.max() * 0.5 else "black")
-
-plt.tight_layout()
-out_hm = "dynamics_heatmap.png"
-fig_hm.tight_layout()
-fig_hm.savefig(out_hm, dpi=150)
-print(f"Saved {out_hm}")
-plt.close(fig_hm)
+if __name__ == "__main__":
+    main()
