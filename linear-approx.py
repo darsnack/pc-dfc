@@ -6,10 +6,12 @@ Procedure:
   2. Run PCN free-phase dynamics until convergence (fixed point).
   3. Sweep over noise magnitudes; for each, clamp the output to
      fp_output + noise_direction * magnitude and run both networks.
-  4. Plots
+  4. Plots (per layer-count)
        dynamics_layer{l}.png  -- per-neuron time series, rows = noise levels
        dynamics_pca.png       -- PC1/PC2 trajectories, rows = noise levels
        dynamics_heatmap.png   -- layer x noise heatmap of PCN vs approx-PC error
+  5. Summary plot (across layer counts)
+       summary_heatmap.png    -- noise magnitude x total layers, max error
 """
 
 import hydra
@@ -25,6 +27,7 @@ from pathlib import Path
 from projectlib.dynamics import approx_pc_step, current_pc_vjp, pc_step, run
 from projectlib.models import MLP
 from projectlib.utils import noop
+
 
 def fit_pca(traj_a, traj_b):
     """Fit PCA basis on two trajectories; return a project() fn and n_components."""
@@ -43,6 +46,7 @@ def fit_pca(traj_a, traj_b):
             return (np.array(t) - mean) @ components.T
 
     return project, n_components
+
 
 def gradient_lc(ax, proj, cmap_name):
     """Draw a time-coloured LineCollection on ax; return handle for legend."""
@@ -68,13 +72,21 @@ def gradient_lc(ax, proj, cmap_name):
 
     return handle
 
+
 def concat(free, clamped):
     """Stitch free-phase and clamped-phase histories (drop duplicate junction)."""
     return jnp.concatenate([free, clamped[1:]], axis=0)
 
-@hydra.main(config_path="./configs", config_name="linear-approx", version_base=None)
-def main(cfg):
-    layer_dims = [cfg.model.input_dim, *cfg.model.hidden_dims, cfg.model.output_dim]
+
+def run_single_simulation(layer_dims, cfg, out_dir):
+    """Run a single PCN vs approx-PC comparison for a given architecture.
+
+    Saves per-layer dynamics, PCA, and heatmap plots into *out_dir*.
+    Returns the (n_noise, n_layers) diff_matrix of final activation errors.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     n_layers = len(layer_dims) - 1
     n_noise = len(cfg.experiment.noise_sweep)
 
@@ -186,6 +198,7 @@ def main(cfg):
             )
         )
 
+    # --- per-layer dynamics plots ---
     t_axis = np.arange(sweep_pcn_full[0][0].shape[0])
     t_clamp = t_free
 
@@ -242,11 +255,12 @@ def main(cfg):
                     ax.legend(fontsize=6, loc="best")
 
         plt.tight_layout()
-        out = Path.cwd() / f"dynamics_layer{layer_idx + 1}.png"
+        out = out_dir / f"dynamics_layer{layer_idx + 1}.png"
         plt.savefig(out, dpi=cfg.dpi)
         print(f"Saved {out}")
         plt.close(fig)
 
+    # --- PCA trajectory plot ---
     pca_fns = [
         fit_pca(sweep_pcn_clamp[0][layer_idx], sweep_approx_clamp[0][layer_idx])
         for layer_idx in range(n_layers)
@@ -307,11 +321,12 @@ def main(cfg):
                 ax.legend([h_pcn, h_approx], ["PCN", "approx-PC"], fontsize=7)
 
     plt.tight_layout()
-    out_pca = Path.cwd() / "dynamics_pca.png"
+    out_pca = out_dir / "dynamics_pca.png"
     fig_pca.savefig(out_pca, dpi=cfg.dpi)
     print(f"Saved {out_pca}")
     plt.close(fig_pca)
 
+    # --- per-simulation heatmap ---
     fig_hm, ax_hm = plt.subplots(
         figsize=(max(3, 1.2 * n_layers), max(3, 1.0 * n_noise))
     )
@@ -346,11 +361,99 @@ def main(cfg):
             )
 
     plt.tight_layout()
-    out_hm = Path.cwd() / "dynamics_heatmap.png"
+    out_hm = out_dir / "dynamics_heatmap.png"
     fig_hm.tight_layout()
     fig_hm.savefig(out_hm, dpi=cfg.dpi)
     print(f"Saved {out_hm}")
     plt.close(fig_hm)
+
+    return diff_matrix
+
+
+@hydra.main(config_path="./configs", config_name="linear-approx", version_base=None)
+def main(cfg):
+    base_dir = Path.cwd()
+    noise_sweep = list(cfg.experiment.noise_sweep)
+    n_noise = len(noise_sweep)
+
+    # Determine which layer configurations to run.
+    layer_sweep = cfg.experiment.get("layer_sweep", None)
+
+    if layer_sweep is not None:
+        total_layers_list = sorted(int(n) for n in layer_sweep)
+        hidden_size = int(cfg.model.hidden_size)
+    else:
+        # Fall back to a single run with the explicit hidden_dims.
+        total_layers_list = None
+
+    if total_layers_list is not None:
+        # --- sweep over total layer counts ---
+        # summary_matrix: rows = noise magnitudes, cols = total layer counts
+        summary_matrix = np.zeros((n_noise, len(total_layers_list)))
+
+        for col_idx, total_layers in enumerate(total_layers_list):
+            n_hidden = total_layers - 1  # total_layers counts input-to-output edges
+            hidden_dims = [hidden_size] * n_hidden
+            layer_dims = [cfg.model.input_dim, *hidden_dims, cfg.model.output_dim]
+            out_dir = base_dir / f"layers_{total_layers}"
+
+            print(f"\n{'=' * 60}")
+            print(f"Running simulation: {total_layers} total layers  "
+                  f"(hidden_dims={hidden_dims})")
+            print(f"{'=' * 60}")
+
+            diff_matrix = run_single_simulation(layer_dims, cfg, out_dir)
+            # Max error across all layers for each noise level.
+            summary_matrix[:, col_idx] = diff_matrix.max(axis=1)
+
+        # --- summary heatmap ---
+        fig, ax = plt.subplots(
+            figsize=(max(3, 1.2 * len(total_layers_list)), max(3, 1.0 * n_noise))
+        )
+
+        im = ax.imshow(
+            summary_matrix,
+            aspect="auto",
+            cmap="viridis",
+            origin="lower",
+        )
+        fig.colorbar(im, ax=ax, label="max ||PCN - approx-PC||")
+
+        ax.set_xticks(range(len(total_layers_list)))
+        ax.set_xticklabels([str(n) for n in total_layers_list], fontsize=9)
+        ax.set_yticks(range(n_noise))
+        ax.set_yticklabels([f"{mag:.2f}" for mag in noise_sweep], fontsize=9)
+        ax.set_xlabel("Total layers", fontsize=10)
+        ax.set_ylabel("Noise magnitude", fontsize=10)
+        ax.set_title(
+            "Max activation error across layers: PCN vs approx-PC",
+            fontsize=11,
+            fontweight="bold",
+        )
+
+        for noise_idx in range(n_noise):
+            for col_idx in range(len(total_layers_list)):
+                value = summary_matrix[noise_idx, col_idx]
+                ax.text(
+                    col_idx,
+                    noise_idx,
+                    f"{value:.3f}",
+                    ha="center",
+                    va="center",
+                    fontsize=7,
+                    color="white" if value > summary_matrix.max() * 0.5 else "black",
+                )
+
+        plt.tight_layout()
+        out_summary = base_dir / "summary_heatmap.png"
+        fig.savefig(out_summary, dpi=cfg.dpi)
+        print(f"\nSaved {out_summary}")
+        plt.close(fig)
+    else:
+        # --- single run (original behaviour) ---
+        layer_dims = [cfg.model.input_dim, *cfg.model.hidden_dims, cfg.model.output_dim]
+        run_single_simulation(layer_dims, cfg, base_dir)
+
 
 if __name__ == "__main__":
     main()
