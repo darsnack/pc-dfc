@@ -289,7 +289,7 @@ ax_hm.set_yticks(range(N_NOISE))
 ax_hm.set_yticklabels([f"{m:.2f}" for m in NOISE_MAGS], fontsize=9)
 ax_hm.set_xlabel("Layer", fontsize=10)
 ax_hm.set_ylabel("Noise magnitude", fontsize=10)
-ax_hm.set_title("Final activation error: PCN vs approx-PC", fontsize=11, fontweight="bold")
+# ax_hm.set_title("Final activation error: PCN vs approx-PC", fontsize=11, fontweight="bold")
 
 # annotate cells
 for ni in range(N_NOISE):
