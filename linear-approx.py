@@ -44,7 +44,7 @@ parser.add_argument(
     "--noise-sweep", type=float, nargs="+",
     default=[0.1, 0.5, 1.0, 10.0, 50.0],
     metavar="N",
-    help="Noise magnitudes to sweep (default: 0.1 0.3 0.5 0.8 1.2)",
+    help="Noise magnitudes to sweep (default: 0.1 0.5 1.0 10.0 50.0)",
 )
 args = parser.parse_args()
 
@@ -140,6 +140,9 @@ for ni, mag in enumerate(NOISE_MAGS):
         diff_matrix[ni, l] = np.linalg.norm(
             sweep_pcn_clamp[-1][l][-1] - sweep_approx_clamp[-1][l][-1]
         )
+        # diff_matrix[ni, l] = np.linalg.norm(
+        #     sweep_pcn_clamp[-1][l][-1] - sweep_approx_clamp[-1][l][-1]
+        # ) / max(np.linalg.norm(sweep_pcn_clamp[-1][l][-1]), np.finfo(float).eps)
 
     print(f"  noise={mag:.2f}  |  layer diffs: "
           + "  ".join(f"L{l+1}={diff_matrix[ni,l]:.4f}" for l in range(N_LAYERS)))
@@ -300,6 +303,7 @@ for ni in range(N_NOISE):
 
 plt.tight_layout()
 out_hm = "dynamics_heatmap.png"
+fig_hm.tight_layout()
 fig_hm.savefig(out_hm, dpi=150)
 print(f"Saved {out_hm}")
 plt.close(fig_hm)
