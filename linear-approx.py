@@ -9,19 +9,18 @@ Procedure:
   4. Plots (per layer-count)
        dynamics_layer{l}.png  -- per-neuron time series, rows = noise levels
        dynamics_pca.png       -- PC1/PC2 trajectories, rows = noise levels
-       dynamics_heatmap.png   -- layer x noise heatmap of PCN vs approx-PC error
+        dynamics_lineplot.png  -- layer error curves, color gradient by noise magnitude
   5. Summary plot (across layer counts)
        summary_heatmap.png    -- noise magnitude x total layers, max error
 """
-
 import hydra
 import jax.numpy as jnp
 import jax.random as jrng
 import matplotlib.pyplot as plt
 import numpy as np
+import seaborn as sns
 from flax import nnx
 from matplotlib.colors import LinearSegmentedColormap, LogNorm
-from matplotlib.collections import LineCollection
 from functools import partial
 from pathlib import Path
 
@@ -29,6 +28,9 @@ from projectlib.dynamics import approx_pc_step, current_pc_vjp, pc_step, run
 from projectlib.models import MLP
 from projectlib.utils import noop
 
+def save_fig(fig, fname, **kwargs):
+    fig.savefig(f"{fname}.png", dpi=300, bbox_inches="tight", **kwargs)
+    fig.savefig(f"{fname}.eps", dpi=300, bbox_inches="tight", **kwargs)
 
 PLOT_FONT_SIZE = 12
 plt.rcParams.update({"font.size": PLOT_FONT_SIZE})
@@ -95,32 +97,6 @@ def fit_pca(traj_a, traj_b):
 
     return project, n_components
 
-
-def gradient_lc(ax, proj, cmap_name):
-    """Draw a time-coloured LineCollection on ax; return handle for legend."""
-    segs = np.concatenate([proj[:-1, np.newaxis], proj[1:, np.newaxis]], axis=1)
-    cmap = plt.get_cmap(cmap_name)
-    colors = cmap(0.35 + 0.65 * np.linspace(0, 1, len(segs)))
-    lc = LineCollection(segs, colors=colors, lw=1.8, zorder=2)
-    ax.add_collection(lc)
-    handle, = ax.plot([], [], color=cmap(0.7), lw=1.8)
-    ax.scatter(proj[0, 0], proj[0, 1],
-               marker="o",
-               s=50,
-               color=cmap(0.4),
-               zorder=5,
-               edgecolors="k",
-               lw=0.4)
-    ax.scatter(proj[-1, 0], proj[-1, 1],
-               marker="+",
-               s=100,
-               color=cmap(0.9),
-               zorder=5,
-               lw=1.5)
-
-    return handle
-
-
 def plot_focus_trajectory(ax, proj, color, label):
     """Draw a single trajectory with visible endpoint markers."""
     ax.plot(proj[:, 0], proj[:, 1], color=color, lw=2.0, label=label, zorder=2)
@@ -153,17 +129,17 @@ def plot_focus_trajectory(ax, proj, color, label):
         zorder=7,
     )
 
-
 def concat(free, clamped):
     """Stitch free-phase and clamped-phase histories (drop duplicate junction)."""
     return jnp.concatenate([free, clamped[1:]], axis=0)
 
 
-def run_single_simulation(layer_dims, cfg, out_dir):
+def run_single_simulation(layer_dims, cfg, out_dir, pca_global_limits=None):
     """Run a single PCN vs approx-PC comparison for a given architecture.
 
     Saves per-layer dynamics, PCA, and heatmap plots into *out_dir*.
     Returns the (n_noise, n_layers) diff_matrix of final activation errors.
+    If pca_global_limits is None, also returns PCA projection data for deferred plotting.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -228,6 +204,7 @@ def run_single_simulation(layer_dims, cfg, out_dir):
     sweep_pcn_full = []
     sweep_approx_full = []
     diff_matrix = np.zeros((n_noise, n_layers))
+    convergence_tol = cfg.dynamics.convergence_tolerance
 
     for noise_idx, magnitude in enumerate(cfg.experiment.noise_sweep):
         rclamp = fp_acts[-1] + noise_dir * magnitude
@@ -266,10 +243,11 @@ def run_single_simulation(layer_dims, cfg, out_dir):
         sweep_approx_full.append([concat(f, c) for f, c in zip(free_hist, approx_ch)])
 
         for layer_idx in range(n_layers):
-            diff_matrix[noise_idx, layer_idx] = np.linalg.norm(
+            error_val = np.linalg.norm(
                 sweep_pcn_clamp[-1][layer_idx][-1]
                 - sweep_approx_clamp[-1][layer_idx][-1]
             )
+            diff_matrix[noise_idx, layer_idx] = max(error_val, convergence_tol)
 
         print(
             f"  noise={magnitude:.2f}  |  layer diffs: "
@@ -302,20 +280,22 @@ def run_single_simulation(layer_dims, cfg, out_dir):
 
             for neuron_idx in range(n_neurons):
                 ax = axes[noise_idx, neuron_idx]
-                ax.plot(
-                    t_axis,
-                    pcn_acts[:, neuron_idx],
+                sns.lineplot(
+                    x=t_axis,
+                    y=pcn_acts[:, neuron_idx],
                     color="steelblue",
                     lw=1.2,
-                    label="PCN",
+                    label="PCN" if noise_idx == 0 and neuron_idx == n_neurons - 1 else None,
+                    ax=ax,
                 )
-                ax.plot(
-                    t_axis,
-                    approx_acts[:, neuron_idx],
+                sns.lineplot(
+                    x=t_axis,
+                    y=approx_acts[:, neuron_idx],
                     color="darkorange",
                     lw=1.2,
-                    ls="--",
-                    label="approx-PC",
+                    linestyle="--",
+                    label="approx-PC" if noise_idx == 0 and neuron_idx == n_neurons - 1 else None,
+                    ax=ax,
                 )
                 ax.axvline(t_clamp, color="gray", ls=":", lw=0.8)
                 if layer_idx == n_layers - 1:
@@ -335,9 +315,10 @@ def run_single_simulation(layer_dims, cfg, out_dir):
                 if noise_idx == 0 and neuron_idx == n_neurons - 1:
                     ax.legend(fontsize=6, loc="best")
 
+        sns.despine(fig)
         plt.tight_layout()
-        out = out_dir / f"dynamics_layer{layer_idx + 1}.png"
-        plt.savefig(out, dpi=cfg.dpi)
+        out = out_dir / f"dynamics_layer{layer_idx + 1}"
+        save_fig(fig, out)
         print(f"Saved {out}")
         plt.close(fig)
 
@@ -347,29 +328,28 @@ def run_single_simulation(layer_dims, cfg, out_dir):
         for layer_idx in range(n_layers)
     ]
 
-    pca_limits = []
+    all_pts_global = []
     for layer_idx in range(n_layers):
         project, _ = pca_fns[layer_idx]
-        all_pts = np.concatenate(
-            [
-                project(sweep_pcn_clamp[noise_idx][layer_idx])[:, :2]
-                for noise_idx in range(n_noise)
-            ]
-            + [
-                project(sweep_approx_clamp[noise_idx][layer_idx])[:, :2]
-                for noise_idx in range(n_noise)
-            ],
-            axis=0,
+        all_pts_global.extend(
+            project(sweep_pcn_clamp[noise_idx][layer_idx])[:, :2]
+            for noise_idx in range(n_noise)
         )
-        pad = (all_pts.max() - all_pts.min()) * 0.05 + 1e-6
-        pca_limits.append(
-            (
-                all_pts[:, 0].min() - pad,
-                all_pts[:, 0].max() + pad,
-                all_pts[:, 1].min() - pad,
-                all_pts[:, 1].max() + pad,
-            )
+        all_pts_global.extend(
+            project(sweep_approx_clamp[noise_idx][layer_idx])[:, :2]
+            for noise_idx in range(n_noise)
         )
+    all_pts = np.concatenate(all_pts_global, axis=0)
+    pad = (all_pts.max() - all_pts.min()) * 0.05 + 1e-6
+    x_min, x_max = all_pts[:, 0].min() - pad, all_pts[:, 0].max() + pad
+    y_min, y_max = all_pts[:, 1].min() - pad, all_pts[:, 1].max() + pad
+    x_range = x_max - x_min
+    y_range = y_max - y_min
+    max_range = max(x_range, y_range)
+    x_center = (x_min + x_max) / 2
+    y_center = (y_min + y_max) / 2
+    global_xlim = (x_center - max_range / 2, x_center + max_range / 2)
+    global_ylim = (y_center - max_range / 2, y_center + max_range / 2)
 
     fig_pca, axes_pca = plt.subplots(
         n_noise,
@@ -385,12 +365,47 @@ def run_single_simulation(layer_dims, cfg, out_dir):
             project, n_components = pca_fns[layer_idx]
             pcn_proj = project(sweep_pcn_clamp[noise_idx][layer_idx])[:, :2]
             approx_proj = project(sweep_approx_clamp[noise_idx][layer_idx])[:, :2]
-            h_pcn = gradient_lc(ax, pcn_proj, "Blues")
-            h_approx = gradient_lc(ax, approx_proj, "Oranges")
-            xmin, xmax, ymin, ymax = pca_limits[layer_idx]
-            ax.set_xlim(xmin, xmax)
-            ax.set_ylim(ymin, ymax)
-            ax.set_aspect("equal")
+
+            sns.lineplot(
+                x=pcn_proj[:, 0],
+                y=pcn_proj[:, 1],
+                color="steelblue",
+                lw=1.8,
+                sort=False,
+                label="PCN" if noise_idx == 0 and layer_idx == n_layers - 1 else None,
+                ax=ax,
+            )
+            sns.lineplot(
+                x=approx_proj[:, 0],
+                y=approx_proj[:, 1],
+                color="darkorange",
+                lw=1.8,
+                linestyle="--",
+                sort=False,
+                label="approx-PC" if noise_idx == 0 and layer_idx == n_layers - 1 else None,
+                ax=ax,
+            )
+
+            ax.scatter(
+                pcn_proj[0, 0], pcn_proj[0, 1],
+                marker="o", s=50, facecolors="none", edgecolors="steelblue", lw=1.5, zorder=5,
+            )
+            ax.scatter(
+                pcn_proj[-1, 0], pcn_proj[-1, 1],
+                marker="+", s=100, color="steelblue", lw=1.5, zorder=5,
+            )
+            ax.scatter(
+                approx_proj[0, 0], approx_proj[0, 1],
+                marker="o", s=50, facecolors="none", edgecolors="darkorange", lw=1.5, zorder=5,
+            )
+            ax.scatter(
+                approx_proj[-1, 0], approx_proj[-1, 1],
+                marker="+", s=100, color="darkorange", lw=1.5, zorder=5,
+            )
+
+            ax.set_xlim(global_xlim)
+            ax.set_ylim(global_ylim)
+            ax.set_box_aspect(1)
             ax.set_xlabel("PC 1", fontsize=7)
             if noise_idx == 0:
                 ax.set_title(layer_labels[layer_idx], fontsize=9)
@@ -399,11 +414,12 @@ def run_single_simulation(layer_dims, cfg, out_dir):
             else:
                 ax.set_ylabel("PC 2" if n_components >= 2 else "(1-D)", fontsize=7)
             if noise_idx == 0 and layer_idx == n_layers - 1:
-                ax.legend([h_pcn, h_approx], ["PCN", "approx-PC"], fontsize=7)
+                ax.legend(fontsize=7)
 
+    sns.despine(fig_pca, offset=10)
     plt.tight_layout()
-    out_pca = out_dir / "dynamics_pca.png"
-    fig_pca.savefig(out_pca, dpi=cfg.dpi)
+    out_pca = out_dir / "dynamics_pca"
+    save_fig(fig_pca, out_pca)
     print(f"Saved {out_pca}")
     plt.close(fig_pca)
 
@@ -413,13 +429,12 @@ def run_single_simulation(layer_dims, cfg, out_dir):
     focus_project, focus_n_components = pca_fns[focus_layer_idx]
     focus_pcn_proj = focus_project(sweep_pcn_clamp[focus_noise_idx][focus_layer_idx])[:, :2]
     focus_approx_proj = focus_project(sweep_approx_clamp[focus_noise_idx][focus_layer_idx])[:, :2]
-    xmin, xmax, ymin, ymax = pca_limits[focus_layer_idx]
 
     fig_focus, ax_focus = plt.subplots(figsize=(5.5, 5.0))
     plot_focus_trajectory(ax_focus, focus_pcn_proj, "black", "PCN")
     plot_focus_trajectory(ax_focus, focus_approx_proj, "#c00000", "approx-PC")
-    ax_focus.set_xlim(xmin, xmax)
-    ax_focus.set_ylim(ymin, ymax)
+    ax_focus.set_xlim(global_xlim)
+    ax_focus.set_ylim(global_ylim)
     ax_focus.set_aspect("equal")
     ax_focus.set_box_aspect(1)
     ax_focus.set_xlabel("PC 1", fontsize=10)
@@ -438,35 +453,43 @@ def run_single_simulation(layer_dims, cfg, out_dir):
     print(f"Saved {out_focus}")
     plt.close(fig_focus)
 
-    # --- per-simulation heatmap ---
-    fig_hm, ax_hm = plt.subplots(
-        figsize=(max(3, 1.2 * n_layers), max(3, 1.0 * n_noise))
-    )
+    # --- per-simulation lineplot ---
+    fig_lp, ax_lp = plt.subplots(figsize=(max(4, 1.0 * n_layers), 4))
 
-    im = ax_hm.imshow(
-        diff_matrix,
-        aspect="auto",
-        cmap=HEATMAP_CMAP,
-        origin="lower",
-        norm=heatmap_norm(diff_matrix, cfg.dynamics.convergence_tolerance),
-    )
-    fig_hm.colorbar(im, ax=ax_hm, label="||PCN - approx-PC||")
+    cmap = plt.cm.Blues
+    noise_magnitudes = np.array(cfg.experiment.noise_sweep)
+    norm = plt.Normalize(noise_magnitudes.min(), noise_magnitudes.max())
 
-    ax_hm.set_xticks(range(n_layers))
-    ax_hm.set_xticklabels([f"L{layer_idx + 1}" for layer_idx in range(n_layers)], fontsize=9)
-    ax_hm.set_yticks(range(n_noise))
-    ax_hm.set_yticklabels([f"{mag:.2f}" for mag in cfg.experiment.noise_sweep], fontsize=9)
-    ax_hm.set_xlabel("Layer", fontsize=10)
-    ax_hm.set_ylabel("Noise magnitude", fontsize=10)
-    #ax_hm.set_title("Final activation error: PCN vs approx-PC", fontsize=11, fontweight="bold")
-    style_heatmap(ax_hm, diff_matrix, cfg.dynamics.convergence_tolerance)
+    for noise_idx, magnitude in enumerate(cfg.experiment.noise_sweep):
+        color = cmap(0.3 + 0.7 * norm(magnitude))
+        ax_lp.plot(
+            range(n_layers),
+            diff_matrix[noise_idx],
+            marker="o",
+            markersize=5,
+            lw=1.5,
+            color=color,
+            label=f"{magnitude:.2f}",
+        )
 
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig_lp.colorbar(sm, ax=ax_lp)
+    cbar.set_label("Noise magnitude", fontsize=10)
+    cbar.outline.set_visible(False)
+
+    ax_lp.set_xticks(range(n_layers))
+    ax_lp.set_xticklabels([f"L{layer_idx + 1}" for layer_idx in range(n_layers)], fontsize=9)
+    ax_lp.set_xlabel("Layer", fontsize=10)
+    ax_lp.set_ylabel("||PCN - approx-PC||", fontsize=10)
+    ax_lp.set_title("Final activation error: PCN vs approx-PC", fontsize=11, fontweight="bold", pad=15)
+
+    sns.despine(fig_lp, offset=10)
     plt.tight_layout()
-    out_hm = out_dir / "dynamics_heatmap.png"
-    fig_hm.tight_layout()
-    fig_hm.savefig(out_hm, dpi=cfg.dpi)
-    print(f"Saved {out_hm}")
-    plt.close(fig_hm)
+    out_lp = out_dir / "dynamics_lineplot"
+    save_fig(fig_lp, out_lp)
+    print(f"Saved {out_lp}")
+    plt.close(fig_lp)
 
     return diff_matrix
 
@@ -476,6 +499,11 @@ def main(cfg):
     base_dir = Path.cwd()
     noise_sweep = list(cfg.experiment.noise_sweep)
     n_noise = len(noise_sweep)
+
+    # Setup plotting
+    sns.set_context("paper")
+    sns.set_style("ticks")
+    sns.set_palette("colorblind")
 
     # Determine which layer configurations to run.
     layer_sweep = cfg.experiment.get("layer_sweep", None)
@@ -516,11 +544,10 @@ def main(cfg):
             summary_matrix,
             aspect="auto",
             cmap=HEATMAP_CMAP,
-            origin="lower",
+             origin="lower",
             norm=heatmap_norm(summary_matrix, cfg.dynamics.convergence_tolerance),
         )
         fig.colorbar(im, ax=ax, label="max ||PCN - approx-PC||")
-
         ax.set_xticks(range(len(total_layers_list)))
         ax.set_xticklabels([str(n) for n in total_layers_list], fontsize=9)
         ax.set_yticks(range(n_noise))
@@ -536,7 +563,7 @@ def main(cfg):
 
         plt.tight_layout()
         out_summary = base_dir / "summary_heatmap.png"
-        fig.savefig(out_summary, dpi=cfg.dpi)
+        save_fig(fig, out_summary)
         print(f"\nSaved {out_summary}")
         plt.close(fig)
     else:
