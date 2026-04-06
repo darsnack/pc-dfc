@@ -20,6 +20,7 @@ import jax.random as jrng
 import matplotlib.pyplot as plt
 import numpy as np
 from flax import nnx
+from matplotlib.colors import LinearSegmentedColormap, LogNorm
 from matplotlib.collections import LineCollection
 from functools import partial
 from pathlib import Path
@@ -27,6 +28,53 @@ from pathlib import Path
 from projectlib.dynamics import approx_pc_step, current_pc_vjp, pc_step, run
 from projectlib.models import MLP
 from projectlib.utils import noop
+
+
+PLOT_FONT_SIZE = 12
+plt.rcParams.update({"font.size": PLOT_FONT_SIZE})
+
+HEATMAP_CMAP = LinearSegmentedColormap.from_list(
+    "white_to_green",
+    ["#f7fcf5", "#e5f5e0", "#a1d99b", "#31a354", "#006d2c"],
+)
+HEATMAP_CMAP.set_under("#f7fcf5")
+
+
+def heatmap_norm(values, floor):
+    """Log-scaled norm that keeps exact zeros white and expands small positives."""
+    positive_values = np.asarray(values)[np.asarray(values) > 0]
+    if positive_values.size == 0:
+        vmin = floor
+        vmax = 1.0
+    else:
+        vmin = max(float(positive_values.min()), floor)
+        vmax = float(positive_values.max())
+        if vmax <= vmin:
+            vmax = vmin * 10.0
+    return LogNorm(vmin=vmin, vmax=vmax)
+
+
+def style_heatmap(ax, values, tolerance):
+    """Add faint cell borders and mark near-zero entries with an x."""
+    n_rows, n_cols = values.shape
+    ax.set_xticks(np.arange(-0.5, n_cols, 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, n_rows, 1), minor=True)
+    ax.grid(which="minor", color="#d0d0d0", linestyle="-", linewidth=0.6, alpha=0.65)
+    ax.tick_params(which="minor", bottom=False, left=False)
+
+    for row_idx in range(n_rows):
+        for col_idx in range(n_cols):
+            if values[row_idx, col_idx] <= tolerance:
+                ax.text(
+                    col_idx,
+                    row_idx,
+                    "x",
+                    ha="center",
+                    va="center",
+                    fontsize=9,
+                    color="#7a7a7a",
+                    alpha=0.7,
+                )
 
 
 def fit_pca(traj_a, traj_b):
@@ -71,6 +119,39 @@ def gradient_lc(ax, proj, cmap_name):
                lw=1.5)
 
     return handle
+
+
+def plot_focus_trajectory(ax, proj, color, label):
+    """Draw a single trajectory with visible endpoint markers."""
+    ax.plot(proj[:, 0], proj[:, 1], color=color, lw=2.0, label=label, zorder=2)
+    ax.scatter(
+        proj[0, 0],
+        proj[0, 1],
+        marker="o",
+        s=42,
+        color=color,
+        edgecolors="white",
+        linewidths=0.7,
+        zorder=5,
+    )
+    ax.scatter(
+        proj[-1, 0],
+        proj[-1, 1],
+        marker="+",
+        s=180,
+        color="white",
+        linewidths=4.0,
+        zorder=6,
+    )
+    ax.scatter(
+        proj[-1, 0],
+        proj[-1, 1],
+        marker="+",
+        s=130,
+        color=color,
+        linewidths=2.0,
+        zorder=7,
+    )
 
 
 def concat(free, clamped):
@@ -326,6 +407,37 @@ def run_single_simulation(layer_dims, cfg, out_dir):
     print(f"Saved {out_pca}")
     plt.close(fig_pca)
 
+    # --- standalone PCA focus plot: last hidden layer, largest perturbation ---
+    focus_layer_idx = n_layers - 2
+    focus_noise_idx = n_noise - 1
+    focus_project, focus_n_components = pca_fns[focus_layer_idx]
+    focus_pcn_proj = focus_project(sweep_pcn_clamp[focus_noise_idx][focus_layer_idx])[:, :2]
+    focus_approx_proj = focus_project(sweep_approx_clamp[focus_noise_idx][focus_layer_idx])[:, :2]
+    xmin, xmax, ymin, ymax = pca_limits[focus_layer_idx]
+
+    fig_focus, ax_focus = plt.subplots(figsize=(5.5, 5.0))
+    plot_focus_trajectory(ax_focus, focus_pcn_proj, "black", "PCN")
+    plot_focus_trajectory(ax_focus, focus_approx_proj, "#c00000", "approx-PC")
+    ax_focus.set_xlim(xmin, xmax)
+    ax_focus.set_ylim(ymin, ymax)
+    ax_focus.set_aspect("equal")
+    ax_focus.set_box_aspect(1)
+    ax_focus.set_xlabel("PC 1", fontsize=10)
+    ax_focus.set_ylabel("PC 2" if focus_n_components >= 2 else "(1-D)", fontsize=10)
+    ax_focus.set_title(
+        f"{layer_labels[focus_layer_idx]}, noise={cfg.experiment.noise_sweep[focus_noise_idx]:.2f}",
+        fontsize=11,
+        fontweight="bold",
+    )
+    ax_focus.legend(fontsize=9, loc="best")
+    ax_focus.grid(color="#d9d9d9", linewidth=0.6, alpha=0.6)
+
+    out_focus = out_dir / "dynamics_pca_focus.png"
+    fig_focus.tight_layout()
+    fig_focus.savefig(out_focus, dpi=cfg.dpi)
+    print(f"Saved {out_focus}")
+    plt.close(fig_focus)
+
     # --- per-simulation heatmap ---
     fig_hm, ax_hm = plt.subplots(
         figsize=(max(3, 1.2 * n_layers), max(3, 1.0 * n_noise))
@@ -334,8 +446,9 @@ def run_single_simulation(layer_dims, cfg, out_dir):
     im = ax_hm.imshow(
         diff_matrix,
         aspect="auto",
-        cmap="viridis",
+        cmap=HEATMAP_CMAP,
         origin="lower",
+        norm=heatmap_norm(diff_matrix, cfg.dynamics.convergence_tolerance),
     )
     fig_hm.colorbar(im, ax=ax_hm, label="||PCN - approx-PC||")
 
@@ -345,20 +458,8 @@ def run_single_simulation(layer_dims, cfg, out_dir):
     ax_hm.set_yticklabels([f"{mag:.2f}" for mag in cfg.experiment.noise_sweep], fontsize=9)
     ax_hm.set_xlabel("Layer", fontsize=10)
     ax_hm.set_ylabel("Noise magnitude", fontsize=10)
-    ax_hm.set_title("Final activation error: PCN vs approx-PC", fontsize=11, fontweight="bold")
-
-    for noise_idx in range(n_noise):
-        for layer_idx in range(n_layers):
-            value = diff_matrix[noise_idx, layer_idx]
-            ax_hm.text(
-                layer_idx,
-                noise_idx,
-                f"{value:.3f}",
-                ha="center",
-                va="center",
-                fontsize=7,
-                color="white" if value > diff_matrix.max() * 0.5 else "black",
-            )
+    #ax_hm.set_title("Final activation error: PCN vs approx-PC", fontsize=11, fontweight="bold")
+    style_heatmap(ax_hm, diff_matrix, cfg.dynamics.convergence_tolerance)
 
     plt.tight_layout()
     out_hm = out_dir / "dynamics_heatmap.png"
@@ -414,8 +515,9 @@ def main(cfg):
         im = ax.imshow(
             summary_matrix,
             aspect="auto",
-            cmap="viridis",
+            cmap=HEATMAP_CMAP,
             origin="lower",
+            norm=heatmap_norm(summary_matrix, cfg.dynamics.convergence_tolerance),
         )
         fig.colorbar(im, ax=ax, label="max ||PCN - approx-PC||")
 
@@ -430,19 +532,7 @@ def main(cfg):
             fontsize=11,
             fontweight="bold",
         )
-
-        for noise_idx in range(n_noise):
-            for col_idx in range(len(total_layers_list)):
-                value = summary_matrix[noise_idx, col_idx]
-                ax.text(
-                    col_idx,
-                    noise_idx,
-                    f"{value:.3f}",
-                    ha="center",
-                    va="center",
-                    fontsize=7,
-                    color="white" if value > summary_matrix.max() * 0.5 else "black",
-                )
+        style_heatmap(ax, summary_matrix, cfg.dynamics.convergence_tolerance)
 
         plt.tight_layout()
         out_summary = base_dir / "summary_heatmap.png"
