@@ -14,6 +14,8 @@ dynamics:
   convergence_tolerance: 1e-9
 approx_pc:
   k: 1.0
+  # null = single linearization over full clamp phase (current behavior)
+  steps_between_linearizations: null
 experiment:
   noise_sweep: [0.1, 0.5, 1.0, 10.0, 50.0]
   # total layer counts to sweep (input-to-output); null = single run with hidden_dims

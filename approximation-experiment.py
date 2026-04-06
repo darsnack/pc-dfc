@@ -28,11 +28,81 @@ def concat(free: jnp.ndarray, clamped: jnp.ndarray) -> jnp.ndarray:
     return jnp.concatenate([free, clamped[1:]], axis=0)
 
 
+def run_single_linearized_approximation(
+    model: nnx.Module,
+    x: jnp.ndarray,
+    rclamp: jnp.ndarray,
+    cfg,
+    timesteps: int,
+) -> list[jnp.ndarray]:
+    """Run approx-PC for a fixed number of steps with one linearization."""
+    vjps = current_pc_vjp(model, x)
+    approx_step = partial(approx_pc_step, vjps=vjps, k=cfg.approx_pc.k)
+    _, approx_ch, _ = run(
+        model,
+        approx_step,
+        x,
+        min_timesteps=timesteps,
+        max_timesteps=timesteps,
+        tolerance=cfg.dynamics.convergence_tolerance,
+        tau=cfg.dynamics.time_constant,
+        learn=False,
+        rclamp=rclamp,
+        return_act_history=True,
+    )
+
+    return approx_ch
+
+
+def run_relinearized_approximation(
+    model: nnx.Module,
+    x: jnp.ndarray,
+    rclamp: jnp.ndarray,
+    cfg,
+) -> list[jnp.ndarray]:
+    """Run approx-PC while optionally re-linearizing every fixed number of steps."""
+    total_timesteps = int(cfg.dynamics.clamp_timesteps)
+    steps_between_linearizations = cfg.approx_pc.get("steps_between_linearizations", None)
+
+    if steps_between_linearizations is None:
+        return run_single_linearized_approximation(model, x, rclamp, cfg, total_timesteps)
+
+    steps_between_linearizations = int(steps_between_linearizations)
+    if steps_between_linearizations <= 0:
+        raise ValueError(
+            "approx_pc.steps_between_linearizations must be a positive int or null. "
+            f"Got: {steps_between_linearizations}."
+        )
+
+    remaining = total_timesteps
+    combined_history = None
+    while remaining > 0:
+        segment_timesteps = min(steps_between_linearizations, remaining)
+        segment_history = run_single_linearized_approximation(
+            model,
+            x,
+            rclamp,
+            cfg,
+            segment_timesteps,
+        )
+        if combined_history is None:
+            combined_history = segment_history
+        else:
+            combined_history = [
+                concat(prev_hist, next_hist)
+                for prev_hist, next_hist in zip(combined_history, segment_history)
+            ]
+        remaining -= segment_timesteps
+
+    return combined_history
+
+
 def run_single_simulation(layer_dims: list[int], cfg) -> dict:
     """Run one architecture sweep and return serialized-ready simulation data."""
     n_layers = len(layer_dims) - 1
     noise_sweep = list(cfg.experiment.noise_sweep)
     n_noise = len(noise_sweep)
+    steps_between_linearizations = cfg.approx_pc.get("steps_between_linearizations", None)
 
     activation_fns = {
         "identity": noop,
@@ -85,10 +155,6 @@ def run_single_simulation(layer_dims: list[int], cfg) -> dict:
     noise_dir = jrng.normal(rng_n, fp_acts[-1].shape)
     noise_dir = noise_dir / jnp.linalg.norm(noise_dir)
 
-    tmp_model = nnx.merge(graph_def, fp_state)
-    vjps = current_pc_vjp(tmp_model, x)
-    approx_step = partial(approx_pc_step, vjps=vjps, k=cfg.approx_pc.k)
-
     sweep_pcn_clamp = []
     sweep_approx_clamp = []
     sweep_pcn_full = []
@@ -116,18 +182,7 @@ def run_single_simulation(layer_dims: list[int], cfg) -> dict:
             rclamp=rclamp,
             return_act_history=True,
         )
-        _, approx_ch, _ = run(
-            approx_model,
-            approx_step,
-            x,
-            min_timesteps=cfg.dynamics.clamp_timesteps,
-            max_timesteps=cfg.dynamics.clamp_timesteps,
-            tolerance=cfg.dynamics.convergence_tolerance,
-            tau=cfg.dynamics.time_constant,
-            learn=False,
-            rclamp=rclamp,
-            return_act_history=True,
-        )
+        approx_ch = run_relinearized_approximation(approx_model, x, rclamp, cfg)
 
         pcn_ch_np = [np.asarray(h) for h in pcn_ch]
         approx_ch_np = [np.asarray(h) for h in approx_ch]
@@ -163,6 +218,12 @@ def run_single_simulation(layer_dims: list[int], cfg) -> dict:
         "layer_labels": layer_labels,
         "noise_sweep": noise_sweep,
         "free_timesteps": int(t_free),
+        "clamp_timesteps": int(cfg.dynamics.clamp_timesteps),
+        "steps_between_linearizations": (
+            None
+            if steps_between_linearizations is None
+            else int(steps_between_linearizations)
+        ),
         "convergence_tolerance": convergence_tol,
         "fp_output": np.asarray(fp_acts[-1]),
         "noise_dir": np.asarray(noise_dir),

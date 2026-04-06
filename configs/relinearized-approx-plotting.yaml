@@ -1,0 +1,10 @@
+input:
+  # path to folder produced by approximation-experiment.py
+  experiment_dir: .
+
+dpi: 150
+
+# hydra change working directory
+hydra:
+  job:
+    chdir: true
