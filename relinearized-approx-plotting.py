@@ -88,36 +88,42 @@ def fit_pca(traj_a: np.ndarray, traj_b: np.ndarray):
     return project, n_components
 
 
-def plot_focus_trajectory(ax: plt.Axes, proj: np.ndarray, color: str, label: str) -> None:
-    """Draw a single trajectory with visible endpoint markers."""
-    ax.plot(proj[:, 0], proj[:, 1], color=color, lw=2.0, label=label, zorder=2)
+def plot_focus_trajectory(
+    ax: plt.Axes,
+    proj: np.ndarray,
+    color: str,
+    label: str,
+    linestyle: str = "-",
+) -> None:
+    """Draw a single trajectory in the same style as PCA grid plots."""
+    sns.lineplot(
+        x=proj[:, 0],
+        y=proj[:, 1],
+        color=color,
+        lw=1.8,
+        linestyle=linestyle,
+        sort=False,
+        label=label,
+        ax=ax,
+    )
     ax.scatter(
         proj[0, 0],
         proj[0, 1],
         marker="o",
-        s=42,
-        color=color,
-        edgecolors="white",
-        linewidths=0.7,
+        s=50,
+        facecolors="none",
+        edgecolors=color,
+        lw=1.5,
         zorder=5,
     )
     ax.scatter(
         proj[-1, 0],
         proj[-1, 1],
         marker="+",
-        s=180,
-        color="white",
-        linewidths=4.0,
-        zorder=6,
-    )
-    ax.scatter(
-        proj[-1, 0],
-        proj[-1, 1],
-        marker="+",
-        s=130,
+        s=100,
         color=color,
-        linewidths=2.0,
-        zorder=7,
+        lw=1.5,
+        zorder=5,
     )
 
 
@@ -203,6 +209,8 @@ def plot_single_run(sim_data: dict, out_dir: Path, dpi: int) -> None:
     sweep_pcn_full = sim_data["sweep_pcn_full"]
     sweep_approx_full = sim_data["sweep_approx_full"]
     diff_matrix = np.asarray(sim_data["diff_matrix"])
+    convergence_tol = float(sim_data.get("convergence_tolerance", 0.0))
+    diff_matrix_plot = np.where(diff_matrix <= convergence_tol, 0.0, diff_matrix)
     t_free = int(sim_data["free_timesteps"])
 
     linearization_indices = get_linearization_indices(sim_data)
@@ -411,8 +419,14 @@ def plot_single_run(sim_data: dict, out_dir: Path, dpi: int) -> None:
     focus_approx_proj = focus_project(sweep_approx_clamp[focus_noise_idx][focus_layer_idx])[:, :2]
 
     fig_focus, ax_focus = plt.subplots(figsize=(5.5, 5.0))
-    plot_focus_trajectory(ax_focus, focus_pcn_proj, "black", "PCN")
-    plot_focus_trajectory(ax_focus, focus_approx_proj, "#c00000", "approx-PC")
+    plot_focus_trajectory(ax_focus, focus_pcn_proj, "steelblue", "PCN")
+    plot_focus_trajectory(
+        ax_focus,
+        focus_approx_proj,
+        "darkorange",
+        "approx-PC",
+        linestyle="--",
+    )
     draw_linearization_markers_pca(
         ax_focus,
         focus_approx_proj,
@@ -449,7 +463,7 @@ def plot_single_run(sim_data: dict, out_dir: Path, dpi: int) -> None:
         color = cmap(0.3 + 0.7 * norm(magnitude))
         ax_lp.plot(
             range(n_layers),
-            diff_matrix[noise_idx],
+            diff_matrix_plot[noise_idx],
             marker="o",
             markersize=5,
             lw=1.5,

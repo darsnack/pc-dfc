@@ -16,7 +16,7 @@ from matplotlib.colors import LinearSegmentedColormap, LogNorm
 
 def save_fig(fig: plt.Figure, fname: Path, **kwargs) -> None:
     fig.savefig(f"{fname}.png", dpi=300, bbox_inches="tight", **kwargs)
-    fig.savefig(f"{fname}.eps", dpi=300, bbox_inches="tight", **kwargs)
+    # fig.savefig(f"{fname}.eps", dpi=300, bbox_inches="tight", **kwargs)
 
 
 PLOT_FONT_SIZE = 12
@@ -88,37 +88,44 @@ def fit_pca(traj_a: np.ndarray, traj_b: np.ndarray):
     return project, n_components
 
 
-def plot_focus_trajectory(ax: plt.Axes, proj: np.ndarray, color: str, label: str) -> None:
-    """Draw a single trajectory with visible endpoint markers."""
-    ax.plot(proj[:, 0], proj[:, 1], color=color, lw=2.0, label=label, zorder=2)
+def plot_focus_trajectory(
+    ax: plt.Axes,
+    proj: np.ndarray,
+    color: str,
+    label: str,
+    linestyle: str = "-",
+) -> None:
+    """Draw a single trajectory in the same style as PCA grid plots."""
+    sns.lineplot(
+        x=proj[:, 0],
+        y=proj[:, 1],
+        color=color,
+        lw=1.8,
+        linestyle=linestyle,
+        sort=False,
+        label=label,
+        ax=ax,
+    )
     ax.scatter(
         proj[0, 0],
         proj[0, 1],
         marker="o",
-        s=42,
-        color=color,
-        edgecolors="white",
-        linewidths=0.7,
+        s=50,
+        facecolors="none",
+        edgecolors=color,
+        lw=1.5,
         zorder=5,
     )
     ax.scatter(
         proj[-1, 0],
         proj[-1, 1],
         marker="+",
-        s=180,
-        color="white",
-        linewidths=4.0,
-        zorder=6,
-    )
-    ax.scatter(
-        proj[-1, 0],
-        proj[-1, 1],
-        marker="+",
-        s=130,
+        s=100,
         color=color,
-        linewidths=2.0,
-        zorder=7,
+        lw=1.5,
+        zorder=5,
     )
+    sns.despine(ax=ax, offset=10)
 
 
 def load_simulation_data(file_path: Path) -> dict:
@@ -138,6 +145,8 @@ def plot_single_run(sim_data: dict, out_dir: Path, dpi: int) -> None:
     sweep_pcn_full = sim_data["sweep_pcn_full"]
     sweep_approx_full = sim_data["sweep_approx_full"]
     diff_matrix = np.asarray(sim_data["diff_matrix"])
+    convergence_tol = float(sim_data.get("convergence_tolerance", 0.0))
+    diff_matrix_plot = np.where(diff_matrix <= convergence_tol, 0.0, diff_matrix)
     t_free = int(sim_data["free_timesteps"])
 
     n_noise = len(noise_sweep)
@@ -332,8 +341,14 @@ def plot_single_run(sim_data: dict, out_dir: Path, dpi: int) -> None:
     focus_approx_proj = focus_project(sweep_approx_clamp[focus_noise_idx][focus_layer_idx])[:, :2]
 
     fig_focus, ax_focus = plt.subplots(figsize=(5.5, 5.0))
-    plot_focus_trajectory(ax_focus, focus_pcn_proj, "black", "PCN")
-    plot_focus_trajectory(ax_focus, focus_approx_proj, "#c00000", "approx-PC")
+    plot_focus_trajectory(ax_focus, focus_pcn_proj, "steelblue", "PCN")
+    plot_focus_trajectory(
+        ax_focus,
+        focus_approx_proj,
+        "darkorange",
+        "approx-PC",
+        linestyle="--",
+    )
     ax_focus.set_xlim(global_xlim)
     ax_focus.set_ylim(global_ylim)
     ax_focus.set_aspect("equal")
@@ -345,16 +360,16 @@ def plot_single_run(sim_data: dict, out_dir: Path, dpi: int) -> None:
         fontsize=11,
         fontweight="bold",
     )
-    ax_focus.legend(fontsize=9, loc="best")
-    ax_focus.grid(color="#d9d9d9", linewidth=0.6, alpha=0.6)
+    ax_focus.legend(fontsize=9, loc="best", frameon=False)
+    # ax_focus.grid(color="#d9d9d9", linewidth=0.6, alpha=0.6)
 
-    out_focus = out_dir / "dynamics_pca_focus.png"
+    out_focus = out_dir / "dynamics_pca_focus"
     fig_focus.tight_layout()
-    fig_focus.savefig(out_focus, dpi=dpi)
+    save_fig(fig_focus, out_focus)
     print(f"Saved {out_focus}")
     plt.close(fig_focus)
 
-    fig_lp, ax_lp = plt.subplots(figsize=(max(4, 1.0 * n_layers), 4))
+    fig_lp, ax_lp = plt.subplots(figsize=(max(4, 1.0 * n_layers), 2))
 
     cmap = plt.cm.Blues
     noise_magnitudes = np.array(noise_sweep)
@@ -364,19 +379,20 @@ def plot_single_run(sim_data: dict, out_dir: Path, dpi: int) -> None:
         color = cmap(0.3 + 0.7 * norm(magnitude))
         ax_lp.plot(
             range(n_layers),
-            diff_matrix[noise_idx],
+            diff_matrix_plot[noise_idx],
             marker="o",
             markersize=5,
             lw=1.5,
             color=color,
             label=f"{magnitude:.2f}",
         )
+    sns.despine(fig_lp, offset=10)
 
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cbar = fig_lp.colorbar(sm, ax=ax_lp)
     cbar.set_label("Noise magnitude", fontsize=10)
-    cbar.outline.set_visible(False)
+    # cbar.outline.set_visible(False)
 
     ax_lp.set_xticks(range(n_layers))
     ax_lp.set_xticklabels([f"L{layer_idx + 1}" for layer_idx in range(n_layers)], fontsize=9)
@@ -389,7 +405,6 @@ def plot_single_run(sim_data: dict, out_dir: Path, dpi: int) -> None:
         pad=15,
     )
 
-    sns.despine(fig_lp, offset=10)
     plt.tight_layout()
     out_lp = out_dir / "dynamics_lineplot"
     save_fig(fig_lp, out_lp)
