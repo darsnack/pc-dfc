@@ -219,15 +219,13 @@ def plot_single_run(sim_data: dict, out_dir: Path, dpi: int) -> None:
     n_noise = len(noise_sweep)
     n_layers = diff_matrix.shape[1]
 
-    t_axis = np.arange(sweep_pcn_full[0][0].shape[0])
-
     for layer_idx in range(n_layers):
         n_neurons = sweep_pcn_full[0][layer_idx].shape[1]
         fig, axes = plt.subplots(
             n_noise,
             n_neurons,
             figsize=(max(2.8 * n_neurons, 4), 2.5 * n_noise),
-            sharex=True,
+            sharex=False,
             sharey="row",
             squeeze=False,
         )
@@ -237,11 +235,13 @@ def plot_single_run(sim_data: dict, out_dir: Path, dpi: int) -> None:
             pcn_acts = sweep_pcn_full[noise_idx][layer_idx]
             approx_acts = sweep_approx_full[noise_idx][layer_idx]
             rclamp_val = float(fp_output[0]) + float(noise_dir[0]) * magnitude
+            pcn_t_axis = np.arange(pcn_acts.shape[0])
+            approx_t_axis = np.arange(approx_acts.shape[0])
 
             for neuron_idx in range(n_neurons):
                 ax = axes[noise_idx, neuron_idx]
                 sns.lineplot(
-                    x=t_axis,
+                    x=pcn_t_axis,
                     y=pcn_acts[:, neuron_idx],
                     color="steelblue",
                     lw=1.2,
@@ -251,7 +251,7 @@ def plot_single_run(sim_data: dict, out_dir: Path, dpi: int) -> None:
                     ax=ax,
                 )
                 sns.lineplot(
-                    x=t_axis,
+                    x=approx_t_axis,
                     y=approx_acts[:, neuron_idx],
                     color="darkorange",
                     lw=1.2,

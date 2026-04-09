@@ -38,11 +38,11 @@ def run_single_linearized_approximation(
     """Run approx-PC for a fixed number of steps with one linearization."""
     vjps = current_pc_vjp(model, x)
     approx_step = partial(approx_pc_step, vjps=vjps, k=cfg.approx_pc.k)
-    _, approx_ch, _ = run(
+    _, approx_ch, t = run(
         model,
         approx_step,
         x,
-        min_timesteps=timesteps,
+        # min_timesteps=timesteps,
         max_timesteps=timesteps,
         tolerance=cfg.dynamics.convergence_tolerance,
         tau=cfg.dynamics.time_constant,
@@ -51,7 +51,7 @@ def run_single_linearized_approximation(
         return_act_history=True,
     )
 
-    return approx_ch
+    return approx_ch, t
 
 
 def run_relinearized_approximation(
@@ -59,9 +59,14 @@ def run_relinearized_approximation(
     x: jnp.ndarray,
     rclamp: jnp.ndarray,
     cfg,
-) -> list[jnp.ndarray]:
-    """Run approx-PC while optionally re-linearizing every fixed number of steps."""
-    total_timesteps = int(cfg.dynamics.clamp_timesteps)
+    total_timesteps: int | None = None,
+) -> tuple[list[jnp.ndarray], int]:
+    """Run approx-PC while optionally re-linearizing every fixed number of steps.
+
+    Returns (history, steps_used).
+    """
+    if total_timesteps is None:
+        total_timesteps = int(cfg.dynamics.clamp_timesteps)
     steps_between_linearizations = cfg.approx_pc.get("steps_between_linearizations", None)
 
     if steps_between_linearizations is None:
@@ -78,7 +83,7 @@ def run_relinearized_approximation(
     combined_history = None
     while remaining > 0:
         segment_timesteps = min(steps_between_linearizations, remaining)
-        segment_history = run_single_linearized_approximation(
+        segment_history, t = run_single_linearized_approximation(
             model,
             x,
             rclamp,
@@ -92,8 +97,74 @@ def run_relinearized_approximation(
                 concat(prev_hist, next_hist)
                 for prev_hist, next_hist in zip(combined_history, segment_history)
             ]
-        remaining -= segment_timesteps
+        remaining -= t
 
+    return combined_history, remaining
+
+
+def run_pcn_clamped(
+    model: nnx.Module,
+    x: jnp.ndarray,
+    rclamp_final: jnp.ndarray,
+    cfg,
+) -> list[jnp.ndarray]:
+    """Run PCN clamped phase with a single clamp to rclamp_final."""
+    _, ch, _ = run(
+        model,
+        pc_step,
+        x,
+        # min_timesteps=cfg.dynamics.clamp_timesteps,
+        max_timesteps=cfg.dynamics.clamp_timesteps,
+        tolerance=cfg.dynamics.convergence_tolerance,
+        tau=cfg.dynamics.time_constant,
+        learn=False,
+        rclamp=rclamp_final,
+        return_act_history=True,
+    )
+    return ch
+
+
+def run_approx_clamped(
+    model: nnx.Module,
+    x: jnp.ndarray,
+    fp_output: jnp.ndarray,
+    rclamp_final: jnp.ndarray,
+    cfg,
+    nudge_max_count: int,
+    nudge_scaling_factor: float,
+    nudge_convergence_tolerance: float,
+) -> list[jnp.ndarray]:
+    """Run approx-PC clamped phase with optional multi-nudging and re-linearization.
+
+    Nudges toward rclamp_final until the model output is within
+    nudge_convergence_tolerance of rclamp_final, or nudge_max_count is reached.
+    Each nudge re-linearizes at the current model state.
+    """
+    total_budget = int(cfg.dynamics.clamp_timesteps)
+    total_steps = 0
+    combined_history = None
+    current_output = fp_output
+    nudge_count = 0
+    while (
+        total_steps < total_budget
+        and float(jnp.linalg.norm(rclamp_final - current_output)) > nudge_convergence_tolerance
+        and nudge_count < nudge_max_count
+    ):
+        rclamp_i = current_output + (rclamp_final - current_output) * nudge_scaling_factor
+        seg_history, steps_used = run_relinearized_approximation(
+            model, x, rclamp_i, cfg, total_budget - total_steps
+        )
+        print(f"total_steps={total_steps}, steps_used={steps_used}")
+        total_steps += steps_used
+        current_output = model.activations[-1].value
+        nudge_count += 1
+        if combined_history is None:
+            combined_history = seg_history
+        else:
+            combined_history = [
+                concat(prev, next_h)
+                for prev, next_h in zip(combined_history, seg_history)
+            ]
     return combined_history
 
 
@@ -103,6 +174,9 @@ def run_single_simulation(layer_dims: list[int], cfg) -> dict:
     noise_sweep = list(cfg.experiment.noise_sweep)
     n_noise = len(noise_sweep)
     steps_between_linearizations = cfg.approx_pc.get("steps_between_linearizations", None)
+    nudge_max_count = int(cfg.approx_pc.get("nudge_max_count", 1))
+    nudge_scaling_factor = float(cfg.approx_pc.get("nudge_scaling_factor", 1.0))
+    nudge_convergence_tolerance = float(cfg.approx_pc.get("nudge_convergence_tolerance", 0.0))
 
     activation_fns = {
         "identity": noop,
@@ -165,24 +239,13 @@ def run_single_simulation(layer_dims: list[int], cfg) -> dict:
     free_hist_np = [np.asarray(h) for h in free_hist]
 
     for noise_idx, magnitude in enumerate(noise_sweep):
-        rclamp = fp_acts[-1] + noise_dir * magnitude
+        rclamp_final = fp_acts[-1] + noise_dir * magnitude
 
         pcn_model = nnx.merge(graph_def, fp_state)
         approx_model = nnx.merge(graph_def, fp_state)
 
-        _, pcn_ch, _ = run(
-            pcn_model,
-            pc_step,
-            x,
-            min_timesteps=cfg.dynamics.clamp_timesteps,
-            max_timesteps=cfg.dynamics.clamp_timesteps,
-            tolerance=cfg.dynamics.convergence_tolerance,
-            tau=cfg.dynamics.time_constant,
-            learn=False,
-            rclamp=rclamp,
-            return_act_history=True,
-        )
-        approx_ch = run_relinearized_approximation(approx_model, x, rclamp, cfg)
+        pcn_ch = run_pcn_clamped(pcn_model, x, rclamp_final, cfg)
+        approx_ch = run_approx_clamped(approx_model, x, fp_acts[-1], rclamp_final, cfg, nudge_max_count, nudge_scaling_factor, nudge_convergence_tolerance)
 
         pcn_ch_np = [np.asarray(h) for h in pcn_ch]
         approx_ch_np = [np.asarray(h) for h in approx_ch]
@@ -224,6 +287,9 @@ def run_single_simulation(layer_dims: list[int], cfg) -> dict:
             if steps_between_linearizations is None
             else int(steps_between_linearizations)
         ),
+        "nudge_max_count": nudge_max_count,
+        "nudge_scaling_factor": nudge_scaling_factor,
+        "nudge_convergence_tolerance": nudge_convergence_tolerance,
         "convergence_tolerance": convergence_tol,
         "fp_output": np.asarray(fp_acts[-1]),
         "noise_dir": np.asarray(noise_dir),
