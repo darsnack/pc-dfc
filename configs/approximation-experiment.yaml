@@ -10,12 +10,15 @@ dynamics:
   time_constant: 10.0
   free_min_timesteps: 10
   free_max_timesteps: 2000
-  clamp_timesteps: 1000
-  convergence_tolerance: 1e-9
+  clamp_timesteps: 5000
+  convergence_tolerance: 1e-5
 approx_pc:
   k: 1.0
   # null = single linearization over full clamp phase (current behavior)
   steps_between_linearizations: null
+  nudge_max_count: 1           # max number of nudges toward rclamp_final
+  nudge_scaling_factor: 1.0   # fraction of remaining gap to close each nudge
+  nudge_convergence_tolerance: 0.0  # stop nudging when dist(current_output, rclamp_final) < this
 experiment:
   noise_sweep: [0.1, 0.5, 1.0, 10.0, 50.0]
   # total layer counts to sweep (input-to-output); null = single run with hidden_dims
