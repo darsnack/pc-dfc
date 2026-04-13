@@ -1,10 +1,11 @@
-input:
-  # path to folder produced by approximation-experiment.py
-  experiment_dir: .
+defaults:
+- _self_
+- override hydra/hydra_logging: disabled
+- override hydra/job_logging: disabled
 
-dpi: 150
-
-# hydra change working directory
+experiment_dir: ???
+dpi: 300
 hydra:
-  job:
-    chdir: true
+  output_subdir: null
+  run:
+    dir: .
