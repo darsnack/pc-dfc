@@ -272,7 +272,8 @@ def plot_summary_heatmap(summary_matrix: np.ndarray,
                          total_layers_list: list[int],
                          noise_sweep: list[float],
                          convergence_tolerance: float,
-                         out_path: Path):
+                         out_path: Path,
+                         dpi: int):
     fig, ax = plt.subplots(figsize=(max(3, 1.2 * len(total_layers_list)),
                                     max(3, 1.0 * len(noise_sweep))))
     im = ax.imshow(summary_matrix,
@@ -298,7 +299,7 @@ def plot_summary_heatmap(summary_matrix: np.ndarray,
                 ax.text(col_idx, row_idx, "x",
                         ha="center", va="center", fontsize=9, color="#7a7a7a", alpha=0.7)
     plt.tight_layout()
-    save_fig(fig, out_path)
+    save_fig(fig, out_path, dpi=dpi)
     print(f"Saved {out_path}")
     plt.close(fig)
 
@@ -339,7 +340,8 @@ def main(cfg) -> None:
                              total_layers_list=total_layers_list,
                              noise_sweep=noise_sweep,
                              convergence_tolerance=convergence_tolerance,
-                             out_path=base_dir / "summary_heatmap")
+                             out_path=base_dir / "summary_heatmap",
+                             dpi=cfg.dpi)
 
 
 if __name__ == "__main__":
