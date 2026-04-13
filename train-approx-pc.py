@@ -15,6 +15,26 @@ from projectlib.dynamics import pc_step, current_pc_vjp, approx_pc_step, run
 from projectlib.data import load_dataset, build_dataloader, default_data_transforms
 from projectlib.utils import noop, get_model_params, compute_param_change_norm, accuracy, save_checkpoint
 
+
+def load_checkpoint(checkpoint_path, model, sample_input=None):
+    checkpoint_manager = ocp.CheckpointManager(
+        checkpoint_path,
+        item_handlers=ocp.StandardCheckpointHandler(),
+        options=ocp.CheckpointManagerOptions(create=False)
+    )
+    latest_step = checkpoint_manager.latest_step()
+    if latest_step is not None:
+        # Older checkpoints may include `activations_ff` (nnx.Intermediate).
+        # Materialize this tree before restore so Orbax sees a matching structure.
+        if sample_input is not None:
+            _ = model(sample_input)
+        _, abstract_state = nnx.split(model)
+        restored = checkpoint_manager.restore(latest_step, {"model": abstract_state})
+        checkpoint_manager.wait_until_finished()
+        nnx.update(model, restored["model"])
+        return model, latest_step
+    return model, None
+
 def runs_with_nudges(cfg, rngs, x, y, model, v_fp, vjps, epoch, sample_idx):
     # Keep nudging toward current sample until convergence
     nudge_count = 0
@@ -231,6 +251,12 @@ def main(cfg):
         item_handlers=ocp.StandardCheckpointHandler(),
         options=ocp.CheckpointManagerOptions(create=True, max_to_keep=5)
     )
+
+    if cfg.checkpointing.load_from is not None:
+        ckpt_sample_input = jnp.zeros((cfg.training.batch_size, *input_shape), dtype=jnp.float32)
+        model, loaded_epoch = load_checkpoint(cfg.checkpointing.load_from, model, ckpt_sample_input)
+        if loaded_epoch is not None:
+            tqdm.write(f"Loaded checkpoint from epoch {loaded_epoch}")
 
     # Initial test epoch
     fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1

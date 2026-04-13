@@ -20,7 +20,7 @@ def save_checkpoint(checkpoint_manager, model, epoch):
     checkpoint_manager.save(epoch, {"model": state})
     checkpoint_manager.wait_until_finished()
 
-def load_checkpoint(checkpoint_path, model):
+def load_checkpoint(checkpoint_path, model, sample_input=None):
     checkpoint_manager = ocp.CheckpointManager(
         checkpoint_path,
         item_handlers=ocp.StandardCheckpointHandler(),
@@ -28,6 +28,10 @@ def load_checkpoint(checkpoint_path, model):
     )
     latest_step = checkpoint_manager.latest_step()
     if latest_step is not None:
+        # Older checkpoints may include `activations_ff` (nnx.Intermediate).
+        # Materialize this tree before restore so Orbax sees a matching structure.
+        if sample_input is not None:
+            _ = model(sample_input)
         _, abstract_state = nnx.split(model)
         restored = checkpoint_manager.restore(latest_step, {"model": abstract_state})
         checkpoint_manager.wait_until_finished()
@@ -219,7 +223,8 @@ def main(cfg):
     )
 
     if cfg.checkpointing.load_from is not None:
-        model, loaded_epoch = load_checkpoint(cfg.checkpointing.load_from, model)
+        ckpt_sample_input = jnp.zeros((cfg.training.batch_size, *input_shape), dtype=jnp.float32)
+        model, loaded_epoch = load_checkpoint(cfg.checkpointing.load_from, model, ckpt_sample_input)
         if loaded_epoch is not None:
             tqdm.write(f"Loaded checkpoint from epoch {loaded_epoch}")
 
