@@ -159,10 +159,9 @@ def test_epoch(cfg, model, v_fp, dataset_tst, epoch, log_group = "test"):
                                         tolerance_style=cfg.dynamics.tolerance_style,
                                         learn=False)
 
-        v_fp = activations
-        error_val = float(jnp.mean(jnp.linalg.norm(v_fp[-1][:y.shape[0]] - y, axis=-1)))
+        error_val = float(jnp.mean(jnp.linalg.norm(activations[-1][:y.shape[0]] - y, axis=-1)))
         epoch_errors.append(error_val)
-        epoch_accuracies.append(float(accuracy(v_fp[-1][:y.shape[0]], y)))
+        epoch_accuracies.append(float(accuracy(activations[-1][:y.shape[0]], y)))
 
         wandb.log({
             "epoch": epoch,
