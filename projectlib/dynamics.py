@@ -57,8 +57,13 @@ def current_pc_vjp(model: nnx.Module, x):
         layer = nnx.merge(graph, state)
         return layer(v)
     # run forward direction for each layer, storing the VJPs w.r.t. input
-    vjps = [jax.vjp(lambda _v: call(_v, *nnx.split(layer)), v)[1]
-            for v, layer in zip(vs, model.layers)]
+    vjps = []
+    for i, (v, layer) in enumerate(zip(vs, model.layers)):
+        if i == 0:
+            vjp = jax.vjp(lambda _v, _l=layer: call(_v, *nnx.split(_l)), v)[1]
+        else:
+            vjp = jax.vjp(lambda _v, _l=layer: call(model.activation_fn(_v), *nnx.split(_l)), v)[1]
+        vjps.append(vjp)
 
     return vjps
 
@@ -81,9 +86,12 @@ def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, eta = 1, rclamp =
     # apply error propagation with VJPs starting from next to last layer
     # and working to the front of the network
     error = final_error
-    for v, v_ff, vjp in zip(reversed(model.activations[:-1]),
-                            reversed(model.activations_ff[:-1]),
-                            reversed(vjps[1:])):
+    for act, v_ff, vjp in zip(reversed(model.activations[:-1]),
+                              reversed(model.activations_ff[:-1]),
+                              reversed(vjps[1:])):
+        # extract raw array from Activation variable so that JAX
+        # functions like tanh can be called on it inside nnx.jit
+        v = act.value
         # compute gradient w.r.t. weights
         _v = v if v.ndim == 2 else v[None, :]
         _e = error if error.ndim == 2 else error[None, :]
@@ -106,7 +114,6 @@ def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, eta = 1, rclamp =
     # apply dynamics
     for v, dv in zip(model.activations, reversed(dvs)):
         v.value = v.value + dv
-
     if learn:
         for layer, dw in zip(model.layers, reversed(dws)):
             layer.kernel.value = layer.kernel.value + dw
