@@ -35,7 +35,8 @@ def load_checkpoint(checkpoint_path, model, sample_input=None):
         return model, latest_step
     return model, None
 
-def runs_with_nudges(cfg, rngs, x, y, model, v_fp, vjps, epoch, sample_idx):
+def runs_with_nudges(cfg, rngs, x, y, model, v_fp, vjps, epoch, sample_idx,
+                     integration_step):
     # Keep nudging toward current sample until convergence
     nudge_count = 0
     total_timesteps = 0
@@ -70,7 +71,9 @@ def runs_with_nudges(cfg, rngs, x, y, model, v_fp, vjps, epoch, sample_idx):
 
         # Record nudge statistics
         error_val = float(jnp.mean(jnp.linalg.norm(v_fp[-1][:y.shape[0]] - y, axis=-1)))
+        # TODO: we could probably not have two variables for this since integration_step = cumsum(total_timesteps)
         total_timesteps += timesteps
+        integration_step += timesteps
 
         # Log each nudge step to wandb
         wandb.log({
@@ -78,6 +81,7 @@ def runs_with_nudges(cfg, rngs, x, y, model, v_fp, vjps, epoch, sample_idx):
             "train/sample": sample_idx,
             "train/nudge": nudge_count,
             "train/timesteps_per_nudge": timesteps,
+            "train/integration_step": integration_step,
             "train/dist_to_target": error_val,
             "train/weight_change_norm": float(param_change_norm)
         }, commit=(error_val > cfg.nudge.convergence_tolerance))
@@ -91,7 +95,7 @@ def runs_with_nudges(cfg, rngs, x, y, model, v_fp, vjps, epoch, sample_idx):
             log_dict[f"activity/u{u}/activity"] = float(act_mean[u])
         wandb.log(log_dict)
 
-    return nudge_count, total_timesteps, v_fp, vjps
+    return nudge_count, total_timesteps, v_fp, vjps, integration_step
 
 def initialize_to_fp(cfg, model, sample):
     _, activations, init_steps = run(model, pc_step, sample,
@@ -127,7 +131,7 @@ def test_sample(cfg, rngs, model, x, y):
 
     return error_val, activations
 
-def train_epoch(cfg, rngs, model, dataset_trn, epoch):
+def train_epoch(cfg, rngs, model, dataset_trn, epoch, integration_step):
     epoch_nudge_counts = []
     epoch_timestep_counts = []
     epoch_errors = []
@@ -137,7 +141,18 @@ def train_epoch(cfg, rngs, model, dataset_trn, epoch):
         global_sample_idx = sample_idx + len(dataset_trn) * epoch
         x, y = jnp.array(x), jnp.array(y)
         v_fp, vjps = initialize_to_fp(cfg, model, x)
-        nudge_count, total_timesteps, v_fp, vjps = runs_with_nudges(cfg, rngs, x, y, model, v_fp, vjps, epoch, global_sample_idx)
+        nudge_count, total_timesteps, v_fp, vjps, integration_step = runs_with_nudges(
+            cfg,
+            rngs,
+            x,
+            y,
+            model,
+            v_fp,
+            vjps,
+            epoch,
+            global_sample_idx,
+            integration_step,
+        )
 
         # Evaluate using test_sample for comparable metrics
         error_val, test_activations = test_sample(cfg, rngs, model, x, y)
@@ -154,6 +169,7 @@ def train_epoch(cfg, rngs, model, dataset_trn, epoch):
             "train/sample": global_sample_idx,
             "train/total_nudges_per_sample": nudge_count,
             "train/total_timesteps_per_sample": total_timesteps,
+            "train/integration_step": integration_step,
             "train/batch_final_error": epoch_errors[-1],
             "train/batch_final_accuracy": epoch_accuracies[-1]
         }, commit=(sample_idx < len(dataset_trn) - 1))
@@ -161,6 +177,8 @@ def train_epoch(cfg, rngs, model, dataset_trn, epoch):
     wandb.log({"epoch": epoch,
                "train/avg_epoch_error": jnp.mean(jnp.array(epoch_errors)),
                "train/avg_epoch_accuracy": jnp.mean(jnp.array(epoch_accuracies))})
+
+    return integration_step
 
 def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch, log_group = "test"):
     epoch_errors = []
@@ -258,6 +276,7 @@ def main(cfg):
             tqdm.write(f"Loaded checkpoint from epoch {loaded_epoch}")
 
     # Initial test epoch
+    integration_step = 0
     fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
     init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
     test_epoch(cfg, model, init_v_fp, init_vjps, trn_loader, 0, log_group="train")
@@ -265,14 +284,28 @@ def main(cfg):
     if cfg.profile:
         with jax.profiler.trace("/tmp/jax-trace", create_perfetto_trace=False):
             for epoch in tqdm(range(1, cfg.training.epochs + 1), desc="epochs", position=0, leave=True):
-                train_epoch(cfg, rngs, model, trn_loader, epoch)
+                integration_step = train_epoch(
+                    cfg,
+                    rngs,
+                    model,
+                    trn_loader,
+                    epoch,
+                    integration_step,
+                )
                 fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
                 init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
                 test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, epoch)
                 save_checkpoint(checkpoint_manager, model, epoch)
     else:
         for epoch in tqdm(range(1, cfg.training.epochs + 1), desc="epochs", position=0, leave=True):
-            train_epoch(cfg, rngs, model, trn_loader, epoch)
+            integration_step = train_epoch(
+                cfg,
+                rngs,
+                model,
+                trn_loader,
+                epoch,
+                integration_step,
+            )
             fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
             init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
             test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, epoch)
