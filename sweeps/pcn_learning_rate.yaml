@@ -1,0 +1,30 @@
+program: train-pcn.py
+name: pcn_learning_rate_sweep
+method: grid
+parameters:
+  data:
+    value: mnist
+  model.activation_fn:
+    value: tanh
+  # use this format for nesting
+  # cause otherwise hydra is confused
+  # (see https://github.com/wandb/wandb/issues/4686#issuecomment-2407556397)
+  training.learning_rate:
+    values:
+      - 0.01
+      - 0.005
+      - 0.001
+      - 0.0005
+      - 0.0001
+      - 0.00005
+      - 0.00001
+  training.epochs:
+    value: 50
+command:
+- ${env}
+- PYTHONFAULTHANDLER=1
+- XLA_PYTHON_CLIENT_PREALLOCATE=1
+- uv
+- run
+- ${program}
+- ${args_no_hyphens}

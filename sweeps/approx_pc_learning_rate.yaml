@@ -1,16 +1,25 @@
 program: train-approx-pc.py
-name: learning_rate_sweep
+name: approx_pc_learning_rate_sweep
 method: grid
 parameters:
   data:
     value: mnist
+  model.activation_fn:
+    value: tanh
   # use this format for nesting
   # cause otherwise hydra is confused
   # (see https://github.com/wandb/wandb/issues/4686#issuecomment-2407556397)
   training.learning_rate:
-    values: [0.001, 0.0001, 0.00001]
+    values:
+      - 0.01
+      - 0.005
+      - 0.001
+      - 0.0005
+      - 0.0001
+      - 0.00005
+      - 0.00001
   training.epochs:
-    value: 10
+    value: 50
 command:
 - ${env}
 - PYTHONFAULTHANDLER=1
