@@ -1,0 +1,19 @@
+defaults:
+- _self_
+- override hydra/hydra_logging: disabled
+- override hydra/job_logging: disabled
+
+experiment_dir: ???
+row_axis: noise   # y-axis: rs, sf, noise, or layers
+col_axis: layers  # x-axis: rs, sf, noise, or layers
+# Fixed values for the two non-axis dimensions (ignored if that dim is an axis):
+rs: null          # null or integer relinearize_steps
+sf: 1.0           # scaling_factor
+noise: 1.0        # noise magnitude
+layers: 4         # total layer count
+convergence_tolerance: 1e-5
+dpi: 150
+hydra:
+  output_subdir: null
+  run:
+    dir: .

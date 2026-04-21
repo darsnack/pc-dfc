@@ -1,0 +1,22 @@
+seed: 10
+model:
+  input_dim: 1
+  hidden_dims: [8, 6, 4]
+  output_dim: 1
+  activation_fn: identity   # identity, tanh, relu
+  kernel_init_scale: 1.0
+dynamics:
+  time_constant: 10.0
+  free_min_timesteps: 10
+  free_max_timesteps: 2000
+  clamp_timesteps: 5000
+  convergence_tolerance: 1e-5
+approx_pc:
+  k: 1.0
+noise: 1.0
+relinearize_steps_sweep: [null, 1000, 500, 100]  # null = one linearization for full run
+trajectory_plot_vals: [null, 1000, 500, 100]     # subset of sweep to show in traj/pdiff plots
+dpi: 150
+hydra:
+  job:
+    chdir: true

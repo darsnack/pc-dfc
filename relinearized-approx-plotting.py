@@ -209,39 +209,40 @@ def plot_single_run(sim_data: dict, out_dir: Path, dpi: int):
     print(f"Saved {out_pca}")
     plt.close(fig_pca)
 
-    focus_noise, focus_layer = np.unravel_index(np.argmax(diff_matrix), diff_matrix.shape)
+    focus_layer = int(np.argmax(diff_matrix.max(axis=0)))
     focus_project, _ = pca_fns[focus_layer]
-    focus_pcn_proj = focus_project(pcn_history[focus_noise][focus_layer])[:, :2]
-    focus_approx_proj = focus_project(approx_history[focus_noise][focus_layer])[:, :2]
+    for noise_idx, magnitude in enumerate(noise_sweep):
+        focus_pcn_proj = focus_project(pcn_history[noise_idx][focus_layer])[:, :2]
+        focus_approx_proj = focus_project(approx_history[noise_idx][focus_layer])[:, :2]
 
-    fig_focus, ax_focus = plt.subplots(figsize=(5.5, 5.0))
-    sns.lineplot(x=focus_pcn_proj[:, 0], y=focus_pcn_proj[:, 1],
-                 color=pcn_color, lw=1.8, sort=False, label="PC", ax=ax_focus)
-    ax_focus.scatter(focus_pcn_proj[0, 0], focus_pcn_proj[0, 1],
-                     marker="o", s=50, facecolors="none", edgecolors=pcn_color, lw=1.5, zorder=5)
-    ax_focus.scatter(focus_pcn_proj[-1, 0], focus_pcn_proj[-1, 1],
-                     marker="+", s=100, color=pcn_color, lw=1.5, zorder=5)
-    sns.lineplot(x=focus_approx_proj[:, 0], y=focus_approx_proj[:, 1],
-                 color=approx_color, lw=1.8, sort=False, label="Approx PC", ax=ax_focus)
-    ax_focus.scatter(focus_approx_proj[0, 0], focus_approx_proj[0, 1],
-                     marker="o", s=50, facecolors="none", edgecolors=approx_color, lw=1.5, zorder=5)
-    ax_focus.scatter(focus_approx_proj[-1, 0], focus_approx_proj[-1, 1],
-                     marker="+", s=100, color=approx_color, lw=1.5, zorder=5)
-    draw_linearize_points(ax_focus, focus_approx_proj, linearization_indices, with_label=True)
-    sns.despine(ax=ax_focus, offset=10)
-    ax_focus.set_aspect("equal")
-    ax_focus.set_box_aspect(1)
-    ax_focus.set_xlabel("PC 1", fontsize=10)
-    ax_focus.set_ylabel("PC 2", fontsize=10)
-    ax_focus.set_title(f"{layer_labels[focus_layer]}, noise={noise_sweep[focus_noise]:.2f}",
-                       fontsize=11, fontweight="bold")
-    ax_focus.legend(fontsize=9, loc="best", frameon=False)
+        fig_focus, ax_focus = plt.subplots(figsize=(5.5, 5.0))
+        sns.lineplot(x=focus_pcn_proj[:, 0], y=focus_pcn_proj[:, 1],
+                     color=pcn_color, lw=1.8, sort=False, label="PC", ax=ax_focus)
+        ax_focus.scatter(focus_pcn_proj[0, 0], focus_pcn_proj[0, 1],
+                         marker="o", s=50, facecolors="none", edgecolors=pcn_color, lw=1.5, zorder=5)
+        ax_focus.scatter(focus_pcn_proj[-1, 0], focus_pcn_proj[-1, 1],
+                         marker="+", s=100, color=pcn_color, lw=1.5, zorder=5)
+        sns.lineplot(x=focus_approx_proj[:, 0], y=focus_approx_proj[:, 1],
+                     color=approx_color, lw=1.8, sort=False, label="Approx PC", ax=ax_focus)
+        ax_focus.scatter(focus_approx_proj[0, 0], focus_approx_proj[0, 1],
+                         marker="o", s=50, facecolors="none", edgecolors=approx_color, lw=1.5, zorder=5)
+        ax_focus.scatter(focus_approx_proj[-1, 0], focus_approx_proj[-1, 1],
+                         marker="+", s=100, color=approx_color, lw=1.5, zorder=5)
+        draw_linearize_points(ax_focus, focus_approx_proj, linearization_indices, with_label=True)
+        sns.despine(ax=ax_focus, offset=10)
+        ax_focus.set_aspect("equal")
+        ax_focus.set_box_aspect(1)
+        ax_focus.set_xlabel("PC 1", fontsize=10)
+        ax_focus.set_ylabel("PC 2", fontsize=10)
+        ax_focus.set_title(f"{layer_labels[focus_layer]}, noise={magnitude:.2f}",
+                           fontsize=11, fontweight="bold")
+        ax_focus.legend(fontsize=9, loc="best", frameon=False)
 
-    out_focus = out_dir / "dynamics_pca_focus"
-    fig_focus.tight_layout()
-    save_fig(fig_focus, out_focus, dpi=dpi)
-    print(f"Saved {out_focus}")
-    plt.close(fig_focus)
+        out_focus = out_dir / f"dynamics_pca_focus_noise{magnitude:.2f}"
+        fig_focus.tight_layout()
+        save_fig(fig_focus, out_focus, dpi=dpi)
+        print(f"Saved {out_focus}")
+        plt.close(fig_focus)
 
     fig_lp, ax_lp = plt.subplots(figsize=(max(4, 1.0 * n_layers), 2))
     norm = plt.Normalize(min(noise_sweep), max(noise_sweep))
