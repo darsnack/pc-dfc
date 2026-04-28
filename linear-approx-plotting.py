@@ -95,7 +95,7 @@ def plot_single_run(sim_data: dict, out_dir: Path, dpi: int):
                                  sharex=True,
                                  sharey="row",
                                  squeeze=False)
-        fig.suptitle(layer_labels[layer_idx], fontsize=13, fontweight="bold")
+        fig.suptitle(layer_labels[layer_idx], fontweight="bold")
         for noise_idx, magnitude in enumerate(noise_sweep):
             pcn_acts = pcn_full_history[noise_idx][layer_idx]
             approx_acts = approx_full_history[noise_idx][layer_idx]
@@ -112,13 +112,13 @@ def plot_single_run(sim_data: dict, out_dir: Path, dpi: int):
                     rclamp = float(fp_output[neuron_idx]) + float(noise_dir[neuron_idx]) * magnitude
                     ax.axhline(rclamp, color="crimson", ls="--", lw=0.9, alpha=0.8)
                 if noise_idx == 0:
-                    ax.set_title(f"neuron {neuron_idx}", fontsize=8)
+                    ax.set_title(f"neuron {neuron_idx}")
                 if neuron_idx == 0:
-                    ax.set_ylabel(f"noise\n{magnitude:.2f}", fontsize=7)
+                    ax.set_ylabel(f"noise\n{magnitude:.2f}")
                 if noise_idx == n_noise - 1:
-                    ax.set_xlabel("timestep", fontsize=7)
+                    ax.set_xlabel("timestep")
                 if noise_idx == 0 and neuron_idx == n_neurons - 1:
-                    ax.legend(fontsize=6, loc="best")
+                    ax.legend(loc="best", frameon=False)
         sns.despine(fig)
         plt.tight_layout()
         out = out_dir / f"dynamics_layer{layer_idx + 1}"
@@ -156,16 +156,16 @@ def plot_single_run(sim_data: dict, out_dir: Path, dpi: int):
             ax.scatter(approx_proj[-1, 0], approx_proj[-1, 1],
                        marker="+", s=100, color=approx_color, lw=1.5, zorder=5)
             ax.set_box_aspect(1)
-            ax.set_xlabel("PC 1", fontsize=7)
+            ax.set_xlabel("PC 1")
             if noise_idx == 0:
-                ax.set_title(layer_labels[layer_idx], fontsize=9)
+                ax.set_title(layer_labels[layer_idx])
             if layer_idx == 0:
-                ax.set_ylabel(f"noise={magnitude:.2f}\nPC 2", fontsize=7)
+                ax.set_ylabel(f"noise={magnitude:.2f}\nPC 2")
             else:
-                ax.set_ylabel("PC 2" if n_components >= 2 else "None (1D only)", fontsize=7)
+                ax.set_ylabel("PC 2" if n_components >= 2 else "None (1D only)")
             if noise_idx == 0 and layer_idx == n_layers - 1:
-                ax.legend(fontsize=7, frameon=False)
-    fig_pca.suptitle("Clamped-phase dynamics -- PC1 vs PC2", fontsize=13, fontweight="bold")
+                ax.legend(frameon=False)
+    fig_pca.suptitle("Clamped-phase dynamics", fontweight="bold")
     sns.despine(fig_pca, offset=10)
     fig.tight_layout()
     out_pca = out_dir / "dynamics_pca"
@@ -173,7 +173,12 @@ def plot_single_run(sim_data: dict, out_dir: Path, dpi: int):
     print(f"Saved {out_pca}")
     plt.close(fig_pca)
 
-    focus_noise, focus_layer = np.unravel_index(np.argmax(diff_matrix), diff_matrix.shape)
+    if n_layers > 2:
+        focus_noise, focus_layer = np.unravel_index(np.argmax(diff_matrix[:, :-1]),
+                                                    (diff_matrix.shape[0], diff_matrix.shape[1] - 1))
+    else:
+        focus_noise = diff_matrix.shape[0] - 1
+        focus_layer = 0
     focus_project, _ = pca_fns[focus_layer]
     focus_pcn_proj = focus_project(pcn_history[focus_noise][focus_layer])[:, :2]
     focus_approx_proj = focus_project(approx_history[focus_noise][focus_layer])[:, :2]
@@ -194,11 +199,11 @@ def plot_single_run(sim_data: dict, out_dir: Path, dpi: int):
     sns.despine(ax=ax_focus, offset=10)
     ax_focus.set_aspect("equal")
     ax_focus.set_box_aspect(1)
-    ax_focus.set_xlabel("PC 1", fontsize=10)
-    ax_focus.set_ylabel("PC 2", fontsize=10)
+    ax_focus.set_xlabel("PC 1")
+    ax_focus.set_ylabel("PC 2")
     ax_focus.set_title(f"{layer_labels[focus_layer]}, noise={noise_sweep[focus_noise]:.2f}",
-                       fontsize=11, fontweight="bold")
-    ax_focus.legend(fontsize=9, loc="best", frameon=False)
+                       fontweight="bold")
+    ax_focus.legend(bbox_to_anchor=(0.8, 0.8), frameon=False)
 
     out_focus = out_dir / "dynamics_pca_focus"
     fig_focus.tight_layout()
@@ -206,25 +211,22 @@ def plot_single_run(sim_data: dict, out_dir: Path, dpi: int):
     print(f"Saved {out_focus}")
     plt.close(fig_focus)
 
-    fig_lp, ax_lp = plt.subplots(figsize=(max(4, 1.0 * n_layers), 2))
+    fig_lp, ax_lp = plt.subplots(figsize=(6, 2))
     norm = plt.Normalize(min(noise_sweep), max(noise_sweep))
     for noise_idx, magnitude in enumerate(noise_sweep):
         color = LINEPLOT_CMAP(0.3 + 0.7 * norm(magnitude))
         sns.lineplot(x=list(range(n_layers)), y=diff_matrix_plot[noise_idx],
                      marker="o", markersize=5, lw=1.5, color=color, label=f"{magnitude:.2f}")
     sns.despine(fig_lp, offset=10)
-    ax_lp.legend(frameon=False)
+    ax_lp.legend(frameon=False, ncols=len(noise_sweep), bbox_to_anchor=(1, -1))
 
     sm = plt.cm.ScalarMappable(cmap=LINEPLOT_CMAP, norm=norm)
     sm.set_array([])
     cbar = fig_lp.colorbar(sm, ax=ax_lp)
-    cbar.set_label("Noise magnitude", fontsize=10)
+    cbar.set_label("Noise magnitude")
     ax_lp.set_xticks(range(n_layers))
-    ax_lp.set_xticklabels([f"L{layer_idx + 1}" for layer_idx in range(n_layers)], fontsize=9)
-    ax_lp.set_xlabel("Layer", fontsize=10)
-    ax_lp.set_ylabel("||PCN - approx-PC||", fontsize=10)
-    ax_lp.set_title("Final activation error: PCN vs approx-PC",
-                    fontsize=11, fontweight="bold", pad=15)
+    ax_lp.set_xticklabels([f"L{layer_idx + 1}" for layer_idx in range(n_layers)])
+    ax_lp.set_xlabel("Layer")
     plt.tight_layout()
     out_lp = out_dir / "dynamics_lineplot"
     save_fig(fig_lp, out_lp, dpi=dpi)
@@ -271,7 +273,7 @@ def main(cfg) -> None:
     if not base_dir.exists():
         raise FileNotFoundError(f"Experiment directory does not exist: {base_dir}")
     # setup seaborn style
-    sns.set_context("paper")
+    sns.set_context("paper", font_scale=2)
     sns.set_style("ticks")
     sns.set_palette("colorblind")
     # read in experiment manifest
