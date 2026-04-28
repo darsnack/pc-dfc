@@ -86,8 +86,10 @@ def fit_pca(arrays):
     return project
 
 
-def rs_label(rs):
-    return "null (full run)" if rs is None else f"{rs} steps"
+def rs_label(rs, break_line=False):
+    if rs is None:
+        return "relinearize\nnever" if break_line else "relinearize never"
+    return f"relinearize every\n{rs} steps" if break_line else f"relinearize every {rs} steps"
 
 
 def relinearization_indices(rs, total_timesteps):
@@ -99,7 +101,7 @@ def relinearization_indices(rs, total_timesteps):
 @hydra.main(config_path="./configs", config_name="relinearization-sweep", version_base=None)
 def main(cfg) -> None:
     out_dir = Path.cwd()
-    sns.set_context("paper")
+    sns.set_context("paper", font_scale=2)
     sns.set_style("ticks")
     sns.set_palette("colorblind")
 
@@ -155,26 +157,26 @@ def main(cfg) -> None:
             approx_model = nnx.merge(graph_def, fp_state)
             approx_hists[rs] = run_approx(approx_model, x, rclamp, cfg, rs, pbar=pbar)
 
-    pcn_color = "black"
-    palette = sns.color_palette("husl", len(traj_plot_vals))
+    palette = sns.light_palette("seagreen", len(traj_plot_vals) + 1)[1:]
 
     # Final loss plot (all sweep values)
-    x_labels = [rs_label(rs) for rs in relinearize_steps_sweep]
-    fig_loss, ax_loss = plt.subplots(figsize=(max(4, 0.6 * len(relinearize_steps_sweep)), 3.5))
-    layer_palette = sns.color_palette("colorblind", n_layers)
+    x_labels = ["never" if rs is None else str(rs) for rs in relinearize_steps_sweep]
+    fig_loss, ax_loss = plt.subplots(figsize=(max(6, 0.6 * len(relinearize_steps_sweep) + 2), 3.5))
+    layer_palette = dict(zip(layer_labels, sns.light_palette("seagreen", n_layers + 1)[1:]))
     for layer_idx in range(n_layers):
         pcn_final = pcn_hist[layer_idx][-1]
         final_diffs = [
             float(np.linalg.norm(approx_hists[rs][layer_idx][-1] - pcn_final))
             for rs in relinearize_steps_sweep
         ]
-        ax_loss.plot(x_labels, final_diffs, marker="o", lw=1.5,
-                     color=layer_palette[layer_idx], label=layer_labels[layer_idx])
-    ax_loss.set_xlabel("relinearize_steps", fontsize=10)
-    ax_loss.set_ylabel(r"$\|\mathbf{v}_\mathrm{approx}^T - \mathbf{v}_\mathrm{PCN}^T\|$", fontsize=10)
-    ax_loss.set_title(f"Final activation diff  |  noise={cfg.noise:.2f}", fontsize=11, fontweight="bold")
-    ax_loss.legend(fontsize=7, frameon=False, loc="best")
-    plt.xticks(rotation=45, ha="right", fontsize=8)
+        sns.lineplot(x=x_labels, y=final_diffs, marker="o", linewidth=1.5, sort=False,
+                     color=layer_palette[layer_labels[layer_idx]], label=layer_labels[layer_idx],
+                     ax=ax_loss)
+    ax_loss.set_xlabel("Relinearization Frequency (steps)")
+    ax_loss.set_ylabel(r"$\|\mathbf{v}_\mathrm{approx}^T - \mathbf{v}_\mathrm{PCN}^T\|$")
+    ax_loss.set_title(f"Final activation diff  |  noise={cfg.noise:.2f}", fontweight="bold")
+    ax_loss.legend(frameon=False, loc="upper left", bbox_to_anchor=(1, 1))
+    plt.xticks(rotation=45, ha="right")
     sns.despine(ax=ax_loss)
     fig_loss.tight_layout()
     out_loss = out_dir / "final_loss.png"
@@ -192,37 +194,43 @@ def main(cfg) -> None:
         project = fit_pca([pcn_layer] + list(approx_layers.values()))
         pcn_proj = project(pcn_layer)
 
-        # assign alphas: smaller relinearize_steps → higher alpha; null → red
+        # assign alphas: smaller relinearize_steps → higher alpha
         finite_rs = sorted([rs for rs in relinearize_steps_sweep if rs is not None])
         n_finite = len(finite_rs)
-        alpha_map = {rs: 1.0 - 0.6 * i / max(n_finite - 1, 1)
-                     for i, rs in enumerate(finite_rs)}  # smallest rs → alpha 1.0
+        alpha_map = {rs: 1.0 - 0.85 * i / max(n_finite - 1, 1)
+                     for i, rs in enumerate(finite_rs)}
 
-        fig, ax = plt.subplots(figsize=(5, 5))
-        ax.plot(pcn_proj[:, 0], pcn_proj[:, 1], color=pcn_color, lw=2,
-                label="PCN", zorder=10)
-        ax.scatter(pcn_proj[0, 0], pcn_proj[0, 1], marker="o", s=50,
-                   facecolors="none", edgecolors=pcn_color, lw=1.5, zorder=11)
-        ax.scatter(pcn_proj[-1, 0], pcn_proj[-1, 1], marker="+", s=100,
-                   color=pcn_color, lw=1.5, zorder=11)
+        traj_palette = sns.color_palette()
+        pc_color = traj_palette[0]
+        approx_color = traj_palette[1]
+
+        fig, ax = plt.subplots(figsize=(5.5, 5.5))
+        sns.lineplot(x=pcn_proj[:, 0], y=pcn_proj[:, 1], color=pc_color, linewidth=2,
+                     label="PC", zorder=10, sort=False, ax=ax)
+        sns.scatterplot(x=[pcn_proj[0, 0]], y=[pcn_proj[0, 1]], marker="o", s=50,
+                        facecolors="none", edgecolors=pc_color, linewidth=1.5, zorder=11, ax=ax)
+        sns.scatterplot(x=[pcn_proj[-1, 0]], y=[pcn_proj[-1, 1]], marker="+", s=100,
+                        color=pc_color, linewidth=1.5, zorder=11, ax=ax)
         for rs, approx_layer in approx_layers.items():
             proj = project(approx_layer)
-            color = "crimson" if rs is None else "steelblue"
             alpha = 1.0 if rs is None else alpha_map[rs]
-            ax.plot(proj[:, 0], proj[:, 1], color=color, alpha=alpha, lw=1.5,
-                    label=f"approx  rs={rs_label(rs)}")
-            ax.scatter(proj[0, 0], proj[0, 1], marker="o", s=30, alpha=alpha,
-                       facecolors="none", edgecolors=color, lw=1.2)
-            ax.scatter(proj[-1, 0], proj[-1, 1], marker="+", s=80,
-                       color=color, alpha=alpha, lw=1.2)
+            sns.lineplot(x=proj[:, 0], y=proj[:, 1], color=approx_color, alpha=alpha, linewidth=1.5,
+                         label=f"Approx PC ({rs_label(rs)})", sort=False, ax=ax)
+            sns.scatterplot(x=[proj[0, 0]], y=[proj[0, 1]], marker="o", s=30, alpha=alpha,
+                            facecolors="none", edgecolors=approx_color, linewidth=1.2, ax=ax)
+            sns.scatterplot(x=[proj[-1, 0]], y=[proj[-1, 1]], marker="+", s=100,
+                            color=approx_color, alpha=alpha, linewidth=1.5, ax=ax)
             lin_idx = relinearization_indices(rs, int(cfg.dynamics.clamp_timesteps))
             valid = [i for i in lin_idx if i < len(proj)]
-            ax.scatter(proj[valid, 0], proj[valid, 1], marker=".", s=25,
-                       color=color, alpha=alpha, zorder=8)
-        ax.set_xlabel("PC 1", fontsize=10)
-        ax.set_ylabel("PC 2", fontsize=10)
-        ax.set_title(title, fontsize=11, fontweight="bold")
-        ax.legend(fontsize=7, frameon=False, loc="best")
+            if valid:
+                sns.scatterplot(x=proj[valid, 0], y=proj[valid, 1], marker=".", s=25,
+                                color="red", alpha=alpha, zorder=8, ax=ax)
+        ax.set_xlabel("PC 1")
+        ax.set_ylabel("PC 2")
+        ax.set_aspect("equal")
+        ax.set_box_aspect(1)
+        ax.set_title(title, fontweight="bold")
+        ax.legend(frameon=False, loc="upper left", bbox_to_anchor=(1, 1))
         sns.despine(ax=ax, offset=10)
         fig.tight_layout()
         out = out_dir / "traj" / f"layer{layer_idx + 1}"
@@ -232,15 +240,16 @@ def main(cfg) -> None:
         plt.close(fig)
 
         # pdiff over time
-        fig, ax = plt.subplots(figsize=(6, 3))
+        fig, ax = plt.subplots(figsize=(8, 3))
         for (rs, approx_layer), color in zip(approx_layers.items(), palette):
             min_t = min(len(pcn_layer), len(approx_layer))
             diff = np.linalg.norm(approx_layer[:min_t] - pcn_layer[:min_t], axis=-1)
-            ax.plot(diff, color=color, lw=1.5, label=f"rs={rs_label(rs)}")
-        ax.set_xlabel("timestep", fontsize=10)
-        ax.set_ylabel(r"$\|\mathbf{v}_\mathrm{approx} - \mathbf{v}_\mathrm{PCN}\|$", fontsize=10)
-        ax.set_title(title, fontsize=11, fontweight="bold")
-        ax.legend(fontsize=7, frameon=False, loc="best")
+            sns.lineplot(x=np.arange(len(diff)), y=diff, color=color, linewidth=1.5,
+                         label=rs_label(rs), sort=False, ax=ax)
+        ax.set_xlabel("timestep")
+        ax.set_ylabel(r"$\|\mathbf{v}_\mathrm{approx} - \mathbf{v}_\mathrm{PCN}\|$")
+        ax.set_title(title, fontweight="bold")
+        ax.legend(frameon=False, loc="upper left", bbox_to_anchor=(1, 1))
         sns.despine(ax=ax)
         fig.tight_layout()
         out = out_dir / "pdiff" / f"layer{layer_idx + 1}"
@@ -251,35 +260,41 @@ def main(cfg) -> None:
 
         # PCA trajectory — side by side
         n_rs = len(traj_plot_vals)
-        fig, axes = plt.subplots(1, n_rs, figsize=(4.5 * n_rs, 4.5),
-                                 sharex=True, sharey=True)
+        fig, axes = plt.subplots(1, n_rs, figsize=(3 * n_rs, 5),
+                                  sharex=True, sharey=True)
         if n_rs == 1:
             axes = [axes]
-        fig.suptitle(title, fontsize=11, fontweight="bold")
+        fig.suptitle(title, fontweight="bold")
         for ax, (rs, approx_layer) in zip(axes, approx_layers.items()):
             proj = project(approx_layer)
-            ax.plot(pcn_proj[:, 0], pcn_proj[:, 1], color=pcn_color, lw=2,
-                    label="PCN", zorder=10)
-            ax.scatter(pcn_proj[0, 0], pcn_proj[0, 1], marker="o", s=50,
-                       facecolors="none", edgecolors=pcn_color, lw=1.5, zorder=11)
-            ax.scatter(pcn_proj[-1, 0], pcn_proj[-1, 1], marker="+", s=100,
-                       color=pcn_color, lw=1.5, zorder=11)
-            ax.plot(proj[:, 0], proj[:, 1], color="steelblue", lw=1.5,
-                    label="approx", zorder=9)
-            ax.scatter(proj[0, 0], proj[0, 1], marker="o", s=30,
-                       facecolors="none", edgecolors="steelblue", lw=1.2)
-            ax.scatter(proj[-1, 0], proj[-1, 1], marker="o", s=60,
-                       color="darkorange", zorder=12)
+            sns.lineplot(x=pcn_proj[:, 0], y=pcn_proj[:, 1], color=pc_color, linewidth=2,
+                         zorder=10, sort=False, ax=ax)
+            sns.scatterplot(x=[pcn_proj[0, 0]], y=[pcn_proj[0, 1]], marker="o", s=50,
+                            facecolors="none", edgecolors=pc_color, linewidth=1.5, zorder=11, ax=ax)
+            sns.scatterplot(x=[pcn_proj[-1, 0]], y=[pcn_proj[-1, 1]], marker="+", s=100,
+                            color=pc_color, linewidth=1.5, zorder=11, ax=ax)
+            sns.lineplot(x=proj[:, 0], y=proj[:, 1], color=approx_color, linewidth=1.5,
+                         zorder=9, sort=False, ax=ax)
+            sns.scatterplot(x=[proj[0, 0]], y=[proj[0, 1]], marker="o", s=30,
+                            facecolors="none", edgecolors=approx_color, linewidth=1.2, ax=ax)
+            sns.scatterplot(x=[proj[-1, 0]], y=[proj[-1, 1]], marker="+", s=100,
+                            color=approx_color, linewidth=1.5, zorder=12, ax=ax)
             lin_idx = relinearization_indices(rs, int(cfg.dynamics.clamp_timesteps))
             valid = [i for i in lin_idx if i < len(proj)]
-            ax.scatter(proj[valid, 0], proj[valid, 1], marker=".", s=30,
-                       color="crimson", zorder=13)
-            ax.set_title(f"rs={rs_label(rs)}", fontsize=9)
-            ax.set_xlabel("PC 1", fontsize=9)
-            ax.legend(fontsize=7, frameon=False, loc="best")
+            if valid:
+                sns.scatterplot(x=proj[valid, 0], y=proj[valid, 1], marker=".", s=30,
+                                color="red", zorder=13, ax=ax)
+            ax.set_title(rs_label(rs, break_line=True))
+            ax.set_xlabel("PC 1")
+            ax.set_box_aspect(1)
             sns.despine(ax=ax, offset=10)
-        axes[0].set_ylabel("PC 2", fontsize=9)
-        fig.tight_layout()
+        axes[0].set_ylabel("PC 2")
+        pc_handle = plt.Line2D([], [], color=pc_color, linewidth=2, label="PC")
+        approx_handle = plt.Line2D([], [], color=approx_color, linewidth=1.5, label="Approx PC")
+        relin_handle = plt.Line2D([], [], color="red", marker=".", linestyle="None", markersize=6,
+                                   label="Relinearization")
+        fig.legend(handles=[pc_handle, approx_handle, relin_handle],
+                   frameon=False, loc="lower center", ncol=3, bbox_to_anchor=(0.5, -0.02))
         out = out_dir / "traj_sidebyside" / f"layer{layer_idx + 1}"
         out.parent.mkdir(exist_ok=True)
         fig.savefig(f"{out}.png", dpi=cfg.dpi, bbox_inches="tight")
