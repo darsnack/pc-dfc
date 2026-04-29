@@ -37,7 +37,7 @@ def heatmap_norm(values: np.ndarray, floor: float) -> LogNorm:
         vmin = floor
         vmax = 1.0
     else:
-        vmin = max(float(positive_values.min()), floor)
+        vmin = floor
         vmax = float(positive_values.max())
         if vmax <= vmin:
             vmax = vmin * 10.0
@@ -77,7 +77,8 @@ def plot_single_run(sim_data: dict, out_dir: Path, dpi: int):
     approx_full_history = [concatenate_histories(free_history, hist)
                            for hist in approx_history]
     diff_matrix = np.asarray(sim_data["diff_matrix"])
-    convergence_tol = float(sim_data.get("convergence_tolerance", 0.0))
+    # convergence_tol = float(sim_data.get("convergence_tolerance", 0.0))
+    convergence_tol = 1e-10
     diff_matrix_plot = np.where(diff_matrix <= convergence_tol, 0.0, diff_matrix)
     # get parameters
     t_free = free_history[0].shape[0]
@@ -217,6 +218,8 @@ def plot_single_run(sim_data: dict, out_dir: Path, dpi: int):
         color = LINEPLOT_CMAP(0.3 + 0.7 * norm(magnitude))
         sns.lineplot(x=list(range(n_layers)), y=diff_matrix_plot[noise_idx],
                      marker="o", markersize=5, lw=1.5, color=color, label=f"{magnitude:.2f}")
+    if np.all(diff_matrix_plot == 0):
+        ax_lp.set_ylim(0, 1e-10)
     sns.despine(fig_lp, offset=10)
     ax_lp.legend(frameon=False, ncols=len(noise_sweep), bbox_to_anchor=(1, -1))
 
@@ -240,7 +243,7 @@ def plot_summary_heatmap(summary_matrix: np.ndarray,
                          out_path: Path):
     fig, ax = plt.subplots(figsize=(max(3, 1.2 * len(total_layers_list)),
                                     max(3, 1.0 * len(noise_sweep))))
-    im = ax.imshow(summary_matrix,
+    im = ax.imshow(np.where(summary_matrix <= convergence_tolerance, 0.0, summary_matrix),
                    aspect="auto", cmap=HEATMAP_CMAP, origin="lower",
                    norm=heatmap_norm(summary_matrix, convergence_tolerance))
     fig.colorbar(im, ax=ax, label="max ||PCN - approx-PC||")
@@ -296,14 +299,14 @@ def main(cfg) -> None:
         summary_matrix = np.asarray(summary_npz["summary_matrix"])
         total_layers_list = [int(x) for x in np.asarray(summary_npz["total_layers_list"])]
         noise_sweep = [float(x) for x in np.asarray(summary_npz["noise_sweep"])]
-        if "convergence_tolerance" in summary_npz:
-            convergence_tolerance = float(np.asarray(summary_npz["convergence_tolerance"]))
-        else:
-            convergence_tolerance = float(cfg.dynamics.convergence_tolerance)
+        # if "convergence_tolerance" in summary_npz:
+        #     convergence_tolerance = float(np.asarray(summary_npz["convergence_tolerance"]))
+        # else:
+        #     convergence_tolerance = float(cfg.dynamics.convergence_tolerance)
         plot_summary_heatmap(summary_matrix=summary_matrix,
                              total_layers_list=total_layers_list,
                              noise_sweep=noise_sweep,
-                             convergence_tolerance=convergence_tolerance,
+                             convergence_tolerance=1e-10,
                              out_path=base_dir / "summary_heatmap")
 
 
