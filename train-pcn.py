@@ -96,6 +96,82 @@ def run_sample(cfg, rngs, x, y, model, epoch, sample_idx, integration_step):
 
     return activations, total_timesteps, integration_step
 
+def runs_with_nudges(cfg, rngs, x, y, model, v_fp, epoch, sample_idx,
+                     integration_step):
+    nudge_count = 0
+    total_timesteps = 0
+    while jnp.median(jnp.linalg.norm(v_fp[-1][:y.shape[0]] - y, axis=-1)) > cfg.nudge.convergence_tolerance:
+        if nudge_count > cfg.nudge.max_count:
+            break
+        pre_nudge_params = get_model_params(model)
+        nudge_count += 1
+        rclamp = v_fp[-1][:y.shape[0]] + (y - v_fp[-1][:y.shape[0]]) * cfg.nudge.scaling_factor
+
+        if cfg.dynamics.sync_updates:
+            _, activations, timesteps = run(model, pc_step, x,
+                                            disable_tqdm=True,
+                                            tau=cfg.dynamics.time_constant,
+                                            eta=cfg.training.learning_rate,
+                                            min_timesteps=cfg.dynamics.min_timesteps,
+                                            max_timesteps=cfg.dynamics.max_timesteps,
+                                            tolerance=cfg.dynamics.convergence_tolerance,
+                                            tolerance_style=cfg.dynamics.tolerance_style,
+                                            learn=True,
+                                            rclamp=rclamp)
+            nudge_timesteps = timesteps
+        else:
+            _, _, timesteps_inference = run(model, pc_step, x,
+                                            disable_tqdm=True,
+                                            tau=cfg.dynamics.time_constant,
+                                            eta=cfg.training.learning_rate,
+                                            min_timesteps=20,
+                                            max_timesteps=20,
+                                            tolerance=cfg.dynamics.convergence_tolerance,
+                                            tolerance_style=cfg.dynamics.tolerance_style,
+                                            learn=False,
+                                            rclamp=rclamp)
+            _, activations, timesteps_learning = run(model, pc_step, x,
+                                                    disable_tqdm=True,
+                                                    tau=100000,
+                                                    eta=cfg.training.learning_rate,
+                                                    min_timesteps=1,
+                                                    max_timesteps=1,
+                                                    tolerance=cfg.dynamics.convergence_tolerance,
+                                                    tolerance_style=cfg.dynamics.tolerance_style,
+                                                    learn=True,
+                                                    rclamp=rclamp)
+            nudge_timesteps = timesteps_inference + timesteps_learning
+
+        v_fp = activations
+        total_timesteps += nudge_timesteps
+        integration_step += nudge_timesteps
+
+        post_nudge_params = get_model_params(model)
+        param_change_norm = compute_param_change_norm(pre_nudge_params, post_nudge_params)
+
+        error_val = float(jnp.mean(jnp.linalg.norm(v_fp[-1][:y.shape[0]] - y, axis=-1)))
+
+        wandb.log({
+            "epoch": epoch,
+            "train/sample": sample_idx,
+            "train/nudge": nudge_count,
+            "train/timesteps_per_nudge": nudge_timesteps,
+            "train/integration_step": integration_step,
+            "train/dist_to_target": error_val,
+            "train/weight_change_norm": float(param_change_norm)
+        }, commit=(error_val > cfg.nudge.convergence_tolerance))
+
+        clamp_mean = jnp.mean(rclamp, axis=0)
+        act_mean   = jnp.mean(activations[-1], axis=0)
+
+        log_dict = {}
+        for u in range(clamp_mean.shape[0]):
+            log_dict[f"activity/u{u}/clamp"]    = float(clamp_mean[u])
+            log_dict[f"activity/u{u}/activity"] = float(act_mean[u])
+        wandb.log(log_dict)
+
+    return nudge_count, total_timesteps, v_fp, integration_step
+
 def initialize_to_fp(cfg, model, sample):
     _, activations, init_steps = run(model, pc_step, sample,
                                      disable_tqdm=True,
@@ -127,33 +203,39 @@ def test_sample(cfg, rngs, model, x, y):
 def train_epoch(cfg, rngs, model, dataset_trn, epoch, integration_step):
     epoch_errors = []
     epoch_accuracies = []
+    epoch_nudge_counts = []
 
     for sample_idx, (x, y) in tqdm(enumerate(dataset_trn), desc="training", position=1, leave=False):
         global_sample_idx = sample_idx + len(dataset_trn) * epoch
         x, y = jnp.array(x), jnp.array(y)
         v_fp = initialize_to_fp(cfg, model, x)
-        v_fp, total_timesteps, integration_step = run_sample(
-            cfg,
-            rngs,
-            x,
-            y,
-            model,
-            epoch,
-            global_sample_idx,
-            integration_step,
-        )
 
-        epoch_errors.append(float(jnp.mean(jnp.linalg.norm(v_fp[-1][:y.shape[0]] - y, axis=-1))))
-        epoch_accuracies.append(float(accuracy(v_fp[-1][:y.shape[0]], y)))
+        if cfg.nudge.enabled:
+            nudge_count, total_timesteps, v_fp, integration_step = runs_with_nudges(
+                cfg, rngs, x, y, model, v_fp, epoch, global_sample_idx, integration_step,
+            )
+            error_val, test_activations = test_sample(cfg, rngs, model, x, y)
+            epoch_nudge_counts.append(nudge_count)
+            epoch_errors.append(error_val)
+            epoch_accuracies.append(float(accuracy(test_activations[-1][:y.shape[0]], y)))
+        else:
+            v_fp, total_timesteps, integration_step = run_sample(
+                cfg, rngs, x, y, model, epoch, global_sample_idx, integration_step,
+            )
+            epoch_errors.append(float(jnp.mean(jnp.linalg.norm(v_fp[-1][:y.shape[0]] - y, axis=-1))))
+            epoch_accuracies.append(float(accuracy(v_fp[-1][:y.shape[0]], y)))
 
-        wandb.log({
+        log_dict = {
             "epoch": epoch,
             "train/sample": global_sample_idx,
             "train/total_timesteps_per_sample": total_timesteps,
             "train/integration_step": integration_step,
             "train/batch_final_error": epoch_errors[-1],
             "train/batch_final_accuracy": epoch_accuracies[-1]
-        }, commit=(sample_idx < len(dataset_trn) - 1))
+        }
+        if cfg.nudge.enabled:
+            log_dict["train/total_nudges_per_sample"] = nudge_count
+        wandb.log(log_dict, commit=(sample_idx < len(dataset_trn) - 1))
 
     wandb.log({"epoch": epoch,
                "train/avg_epoch_error": jnp.mean(jnp.array(epoch_errors)),

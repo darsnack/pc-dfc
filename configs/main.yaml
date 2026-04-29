@@ -11,6 +11,7 @@ dynamics:
   tolerance_style: norm
   sync_updates: true
 nudge:
+  enabled: false
   max_count: 100
   convergence_tolerance: 1e-5
   scaling_factor: 0.1 # scale the nudge in the dir. of fixed pt.
