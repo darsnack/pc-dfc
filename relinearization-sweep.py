@@ -150,6 +150,8 @@ def main(cfg) -> None:
                                 for rs in cfg.relinearize_steps_sweep]
     traj_plot_vals = [None if rs is None else int(rs)
                       for rs in cfg.get("trajectory_plot_vals", cfg.relinearize_steps_sweep)]
+    loss_plot_vals = [None if rs is None else int(rs)
+                      for rs in cfg.get("loss_plot_vals", cfg.relinearize_steps_sweep)]
     approx_hists = {}
     for rs in relinearize_steps_sweep:
         with tqdm(total=int(cfg.dynamics.clamp_timesteps),
@@ -159,31 +161,38 @@ def main(cfg) -> None:
 
     palette = sns.light_palette("seagreen", len(traj_plot_vals) + 1)[1:]
 
-    # Final loss plot (all sweep values)
-    x_labels = ["never" if rs is None else str(rs) for rs in relinearize_steps_sweep]
-    fig_loss, ax_loss = plt.subplots(figsize=(max(6, 0.6 * len(relinearize_steps_sweep) + 2), 3.5))
+    # Final loss plot helper
     layer_palette = dict(zip(layer_labels, sns.light_palette("seagreen", n_layers + 1)[1:]))
-    for layer_idx in range(n_layers):
-        pcn_final = pcn_hist[layer_idx][-1]
-        final_diffs = [
-            float(np.linalg.norm(approx_hists[rs][layer_idx][-1] - pcn_final))
-            for rs in relinearize_steps_sweep
-        ]
-        sns.lineplot(x=x_labels, y=final_diffs, marker="o", linewidth=1.5, sort=False,
-                     color=layer_palette[layer_labels[layer_idx]], label=layer_labels[layer_idx],
-                     ax=ax_loss)
-    ax_loss.set_xlabel("Relinearization Frequency (steps)")
-    ax_loss.set_ylabel(r"$\|\mathbf{v}_\mathrm{approx}^T - \mathbf{v}_\mathrm{PCN}^T\|$")
-    ax_loss.set_yscale("log")
-    ax_loss.set_title(f"Final activation diff  |  noise={cfg.noise:.2f}", fontweight="bold")
-    ax_loss.legend(frameon=False, loc="upper left", bbox_to_anchor=(1, 1))
-    plt.xticks(rotation=45, ha="right")
-    sns.despine(ax=ax_loss)
-    fig_loss.tight_layout()
-    out_loss = out_dir / "final_loss.png"
-    fig_loss.savefig(out_loss, dpi=cfg.dpi, bbox_inches="tight")
-    print(f"Saved {out_loss}")
-    plt.close(fig_loss)
+
+    def make_final_loss_plot(rs_values, filename, figsize):
+        x_labels = ["never" if rs is None else str(rs) for rs in rs_values]
+        fig_loss, ax_loss = plt.subplots(figsize=figsize)
+        for layer_idx in range(n_layers):
+            pcn_final = pcn_hist[layer_idx][-1]
+            final_diffs = [
+                float(np.linalg.norm(approx_hists[rs][layer_idx][-1] - pcn_final))
+                for rs in rs_values
+            ]
+            sns.lineplot(x=x_labels, y=final_diffs, marker="o", linewidth=1.5, sort=False,
+                         color=layer_palette[layer_labels[layer_idx]], label=layer_labels[layer_idx],
+                         ax=ax_loss)
+        ax_loss.set_xlabel("Relinearization Frequency (steps)")
+        ax_loss.set_ylabel(r"$\|\mathbf{v}_\mathrm{approx}^T - \mathbf{v}_\mathrm{PCN}^T\|$")
+        ax_loss.set_yscale("log")
+        ax_loss.set_title(f"Final activation diff  |  noise={cfg.noise:.2f}", fontweight="bold")
+        ax_loss.legend(frameon=False, loc="upper left", bbox_to_anchor=(1, 1))
+        plt.xticks(rotation=45, ha="right")
+        sns.despine(ax=ax_loss)
+        fig_loss.tight_layout()
+        out_loss = out_dir / filename
+        fig_loss.savefig(out_loss, dpi=cfg.dpi, bbox_inches="tight")
+        print(f"Saved {out_loss}")
+        plt.close(fig_loss)
+
+    make_final_loss_plot(relinearize_steps_sweep, "final_loss.png",
+                         figsize=(max(6, 0.6 * len(relinearize_steps_sweep) + 2), 3.5))
+    make_final_loss_plot(loss_plot_vals, "final_loss_subset.png",
+                         figsize=(max(6, 0.6 * len(loss_plot_vals) + 3), 4))
 
     # Per-layer trajectory/pdiff plots (trajectory_plot_vals subset only)
     for layer_idx in range(n_layers):

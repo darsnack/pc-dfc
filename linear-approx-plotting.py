@@ -219,7 +219,7 @@ def plot_single_run(sim_data: dict, out_dir: Path, dpi: int):
         sns.lineplot(x=list(range(n_layers)), y=diff_matrix_plot[noise_idx],
                      marker="o", markersize=5, lw=1.5, color=color, label=f"{magnitude:.2f}")
     if np.all(diff_matrix_plot == 0):
-        ax_lp.set_ylim(0, 1e-10)
+        ax_lp.set_ylim(-1e-11, 1e-10)
     sns.despine(fig_lp, offset=10)
     ax_lp.legend(frameon=False, ncols=len(noise_sweep), bbox_to_anchor=(1, -1))
 
@@ -246,15 +246,14 @@ def plot_summary_heatmap(summary_matrix: np.ndarray,
     im = ax.imshow(np.where(summary_matrix <= convergence_tolerance, 0.0, summary_matrix),
                    aspect="auto", cmap=HEATMAP_CMAP, origin="lower",
                    norm=heatmap_norm(summary_matrix, convergence_tolerance))
-    fig.colorbar(im, ax=ax, label="max ||PCN - approx-PC||")
+    fig.colorbar(im, ax=ax, label="max \| PC - Approx PC\|")
     ax.set_xticks(range(len(total_layers_list)))
-    ax.set_xticklabels([str(n) for n in total_layers_list], fontsize=9)
+    ax.set_xticklabels([str(n) for n in total_layers_list])
     ax.set_yticks(range(len(noise_sweep)))
-    ax.set_yticklabels([f"{mag:.2f}" for mag in noise_sweep], fontsize=9)
-    ax.set_xlabel("Total layers", fontsize=10)
-    ax.set_ylabel("Noise magnitude", fontsize=10)
-    ax.set_title("Max activation error across layers: PCN vs approx-PC",
-                 fontsize=11, fontweight="bold")
+    ax.set_yticklabels([f"{mag:.2f}" for mag in noise_sweep])
+    ax.set_xlabel("Network Size (# of layers)")
+    ax.set_ylabel("Perturbation Size")
+    ax.set_title("Max activation error across layers", fontweight="bold")
     n_rows, n_cols = summary_matrix.shape
     ax.set_xticks(np.arange(-0.5, n_cols, 1), minor=True)
     ax.set_yticks(np.arange(-0.5, n_rows, 1), minor=True)
@@ -263,8 +262,8 @@ def plot_summary_heatmap(summary_matrix: np.ndarray,
     for row_idx in range(n_rows):
         for col_idx in range(n_cols):
             if summary_matrix[row_idx, col_idx] <= convergence_tolerance:
-                ax.text(col_idx, row_idx, "x",
-                        ha="center", va="center", fontsize=9, color="#7a7a7a", alpha=0.7)
+                ax.text(col_idx, row_idx, "X",
+                        ha="center", va="center", color="#7a7a7a", alpha=0.7)
     plt.tight_layout()
     save_fig(fig, out_path)
     print(f"Saved {out_path}")
