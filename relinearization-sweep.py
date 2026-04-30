@@ -174,6 +174,7 @@ def main(cfg) -> None:
                      ax=ax_loss)
     ax_loss.set_xlabel("Relinearization Frequency (steps)")
     ax_loss.set_ylabel(r"$\|\mathbf{v}_\mathrm{approx}^T - \mathbf{v}_\mathrm{PCN}^T\|$")
+    ax_loss.set_yscale("log")
     ax_loss.set_title(f"Final activation diff  |  noise={cfg.noise:.2f}", fontweight="bold")
     ax_loss.legend(frameon=False, loc="upper left", bbox_to_anchor=(1, 1))
     plt.xticks(rotation=45, ha="right")

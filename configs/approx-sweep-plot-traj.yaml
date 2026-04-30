@@ -4,8 +4,8 @@ defaults:
 - override hydra/job_logging: disabled
 
 experiment_dir: ???
-noise: 1.0     # noise magnitude to plot
-layers: 4      # total layer count to plot
+noise: 5.0     # noise magnitude to plot
+layers: 6     # total layer count to plot
 rs: null       # relinearize_steps (null or integer)
 sf: 1.0        # scaling_factor
 dpi: 150

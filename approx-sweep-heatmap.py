@@ -2,6 +2,8 @@
 
 Specify which two sweep dimensions to use as heatmap axes, and fix the
 remaining two at specific values via command-line arguments.
+Also writes scaling-factor line plots, one per perturbation size, using the
+same fixed relinearize_steps value.
 
 summary_matrix axes (from sweep_summary.npz):
   0: relinearize_steps  (null stored as -1)
@@ -14,6 +16,7 @@ Example:
       row_axis=noise col_axis=layers rs=null sf=1.0
 """
 import json
+import pickle
 import hydra
 import matplotlib.pyplot as plt
 import numpy as np
@@ -52,6 +55,14 @@ def find_index(sweep: list, value, name: str) -> int:
     raise ValueError(f"{name}={value!r} not found in sweep {sweep}")
 
 
+def find_run(manifest: dict, total_layers: int) -> dict:
+    for run in manifest.get("runs", []):
+        if int(run["total_layers"]) == total_layers:
+            return run
+    available = [run["total_layers"] for run in manifest.get("runs", [])]
+    raise ValueError(f"layers={total_layers} not found in manifest runs {available}")
+
+
 def plot_heatmap(matrix: np.ndarray,
                  row_ticks: list[str], col_ticks: list[str],
                  row_label: str, col_label: str,
@@ -82,6 +93,53 @@ def plot_heatmap(matrix: np.ndarray,
     plt.tight_layout()
     save_fig(fig, out_path, dpi)
     plt.close(fig)
+
+
+def plot_scaling_factor_lines(sim_data: dict,
+                              rs_idx: int,
+                              rs_label: str,
+                              convergence_tolerance: float,
+                              total_layers: int,
+                              out_dir: Path,
+                              dpi: int) -> None:
+    """Plot final error vs scaling factor for each noise magnitude.
+
+    sim_data["diff_matrix"] shape is:
+      [relinearize_steps, scaling_factor, noise, network_layer]
+    """
+    diff_matrix = np.asarray(sim_data["diff_matrix"])
+    sf_sweep = [float(x) for x in sim_data["scaling_factor_sweep"]]
+    noise_sweep = [float(x) for x in sim_data["noise_sweep"]]
+    layer_labels = [str(x) for x in sim_data["layer_labels"]]
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    x_labels = [f"{sf:g}" for sf in sf_sweep]
+    layer_palette = dict(zip(layer_labels, sns.light_palette("seagreen", len(layer_labels) + 1)[1:]))
+
+    for noise_idx, noise in enumerate(noise_sweep):
+        fig, ax = plt.subplots(figsize=(max(6, 0.6 * len(sf_sweep) + 2), 3.5))
+        for layer_idx, layer_label in enumerate(layer_labels):
+            final_diffs = diff_matrix[rs_idx, :, noise_idx, layer_idx]
+            sns.lineplot(x=x_labels, y=final_diffs, marker="o", linewidth=1.5,
+                         sort=False, color=layer_palette[layer_label],
+                         label=layer_label, ax=ax)
+
+        ax.axhline(convergence_tolerance, color="#7a7a7a", linewidth=0.9,
+                   linestyle="--", alpha=0.65)
+        ax.set_yscale("log")
+        ax.set_xlabel("Scaling factor")
+        ax.set_ylabel(r"$\|\mathbf{v}_\mathrm{approx}^T - \mathbf{v}_\mathrm{PCN}^T\|$")
+        ax.set_title(f"Final activation diff  |  layers={total_layers}  |  noise={noise:.2f}  |  rs={rs_label}",
+                     fontweight="bold")
+        ax.legend(frameon=False, loc="upper left", bbox_to_anchor=(1, 1))
+        plt.xticks(rotation=45, ha="right")
+        sns.despine(ax=ax)
+        fig.tight_layout()
+
+        noise_tag = f"{noise:g}".replace(".", "p").replace("-", "m")
+        out_path = out_dir / f"final_loss_scaling_factor_layers{total_layers}_noise{noise_tag}_rs{rs_label}"
+        save_fig(fig, out_path, dpi)
+        plt.close(fig)
 
 
 @hydra.main(config_path="./configs", config_name="approx-sweep-heatmap", version_base=None)
@@ -175,6 +233,26 @@ def main(cfg) -> None:
         title=title,
         convergence_tolerance=convergence_tolerance,
         out_path=out_path,
+        dpi=cfg.dpi,
+    )
+
+    lineplot_layers = int(cfg.layers)
+    line_run = find_run(manifest, lineplot_layers)
+    with (base_dir / line_run["data_file"]).open("rb") as f:
+        line_sim_data = pickle.load(f)
+
+    line_rs_val = None if cfg.lineplot_rs is None else int(cfg.lineplot_rs)
+    line_rs_sweep = [None if rs is None else int(rs)
+                     for rs in line_sim_data["relinearize_steps_sweep"]]
+    line_rs_idx = find_index(line_rs_sweep, line_rs_val, "lineplot_rs")
+    line_rs_label = "null" if line_rs_val is None else str(line_rs_val)
+    plot_scaling_factor_lines(
+        sim_data=line_sim_data,
+        rs_idx=line_rs_idx,
+        rs_label=line_rs_label,
+        convergence_tolerance=convergence_tolerance,
+        total_layers=lineplot_layers,
+        out_dir=base_dir / "final_loss_by_scaling_factor",
         dpi=cfg.dpi,
     )
 

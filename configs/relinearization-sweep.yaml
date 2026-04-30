@@ -1,15 +1,15 @@
 seed: 10
 model:
   input_dim: 1
-  hidden_dims: [8, 6, 4]
+  hidden_dims: [8,8,8,8,8] #[8, 6, 4]
   output_dim: 1
-  activation_fn: identity   # identity, tanh, relu
+  activation_fn: tanh   # identity, tanh, relu
   kernel_init_scale: 1.0
 dynamics:
   time_constant: 10.0
   free_min_timesteps: 10
   free_max_timesteps: 2000
-  clamp_timesteps: 5000
+  clamp_timesteps: 2000
   convergence_tolerance: 1e-5
 approx_pc:
   k: 1.0
