@@ -18,7 +18,6 @@ relinearize_steps_sweep: [null, 150, 100, 75, 50, 25, 10, 5, 1] # null = one lin
 trajectory_plot_vals: [null, 50, 25, 1]     # subset of sweep to show in traj/pdiff plots
 loss_plot_vals: [null, 150, 75, 25, 5, 1]   # subset of sweep to show in final_loss_subset plot
 dpi: 300
-flow_field_grid_n: 15
 hydra:
   job:
     chdir: true

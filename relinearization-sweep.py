@@ -3,6 +3,7 @@
 For each layer, produces:
   - traj_layer{N}.png  : PCA-projected clamped-phase trajectories, one line per relinearize_steps
   - pdiff_layer{N}.png : ||approx_acts[t] - pcn_acts[t]|| over time, one line per relinearize_steps
+  - deltaflow_layer{N}.png : ||Δflow_l(t)|| over time along the 'relinearize never' trajectory
 """
 import hydra
 import jax.numpy as jnp
@@ -105,60 +106,48 @@ def relinearization_indices(rs, total_timesteps):
     return list(range(0, total_timesteps, step_size))
 
 
-def unproject(p, mean, components):
-    """Map 2D PCA point(s) back to the original activation space."""
-    return np.asarray(p) @ components + mean
+def compute_trajectory_delta_flow(graph_def, fp_state, initial_vjps,
+                                  approx_never_hist, x, k, tau, rclamp):
+    """Compute ||Δflow|| at each timestep along the 'relinearize never' trajectory.
 
-
-def compute_flow_field(graph_def, fp_state, fp_acts, initial_vjps, layer_idx,
-                        x, k, tau, rclamp, pca_mean, pca_components,
-                        bounds_from, other_acts, grid_n=15, padding=0.3):
-    """Compute a conditional flow field for one layer in PCA space.
-
-    Uses approx_pc_step directly with frozen initial VJPs (no reimplementation).
-    Other layers are held at other_acts (should be the approx-PC fixed point
-    for the flow field to have the correct equilibrium).
-    Returns (PX, PY, U, V) for ax.quiver.
+    At each timestep t, compares one step of approx_pc_step with VJPs
+    recomputed at the trajectory state vs. with the initial (frozen) VJPs.
+    Returns array of shape (T, n_layers) with ||Δdv_l(t)|| per layer.
     """
-    all_proj = np.concatenate(bounds_from, axis=0)
-    x_min, x_max = all_proj[:, 0].min(), all_proj[:, 0].max()
-    y_min, y_max = all_proj[:, 1].min(), all_proj[:, 1].max()
-    dx = max(x_max - x_min, 1e-6)
-    dy = max(y_max - y_min, 1e-6)
-    x_min -= padding * dx
-    x_max += padding * dx
-    y_min -= padding * dy
-    y_max += padding * dy
+    n_layers = len(approx_never_hist)
+    T = approx_never_hist[0].shape[0]
+    delta_flow = np.zeros((T, n_layers))
 
-    px = np.linspace(x_min, x_max, grid_n)
-    py = np.linspace(y_min, y_max, grid_n)
-    PX, PY = np.meshgrid(px, py)
-    grid_points = np.column_stack([PX.ravel(), PY.ravel()])
-
-    v_targets = unproject(grid_points, pca_mean, pca_components)
-
-    U = np.zeros((grid_n, grid_n))
-    V = np.zeros((grid_n, grid_n))
-
-    for idx in range(len(grid_points)):
-        i, j = divmod(idx, grid_n)
-        model = nnx.merge(graph_def, fp_state)
-        for l, a in enumerate(other_acts):
-            model.activations[l].value = jnp.asarray(a)
-        model.activations[layer_idx].value = jnp.asarray(v_targets[idx])
+    for t in range(T):
+        model_local = nnx.merge(graph_def, fp_state)
+        for l in range(n_layers):
+            model_local.activations[l].value = jnp.asarray(approx_never_hist[l][t])
         if rclamp is not None:
-            model.activations[-1].value = jnp.asarray(rclamp)
+            model_local.activations[-1].value = jnp.asarray(rclamp)
+        local_vjps = current_pc_vjp(model_local, x)
 
-        v_before = np.asarray(model.activations[layer_idx].value)
-        approx_pc_step(model, x, vjps=initial_vjps, k=k, tau=tau,
-                        rclamp=rclamp, learn=False)
-        v_after = np.asarray(model.activations[layer_idx].value)
-        dv = v_after - v_before
-        dp = dv @ pca_components.T
-        U[i, j] = dp[0]
-        V[i, j] = dp[1]
+        v_before_local = [np.asarray(model_local.activations[l].value) for l in range(n_layers)]
+        approx_pc_step(model_local, x, vjps=local_vjps, k=k, tau=tau,
+                       rclamp=rclamp, learn=False)
+        dv_local = [np.asarray(model_local.activations[l].value) - v_before_local[l]
+                    for l in range(n_layers)]
 
-    return PX, PY, U, V
+        model_init = nnx.merge(graph_def, fp_state)
+        for l in range(n_layers):
+            model_init.activations[l].value = jnp.asarray(approx_never_hist[l][t])
+        if rclamp is not None:
+            model_init.activations[-1].value = jnp.asarray(rclamp)
+
+        v_before_init = [np.asarray(model_init.activations[l].value) for l in range(n_layers)]
+        approx_pc_step(model_init, x, vjps=initial_vjps, k=k, tau=tau,
+                       rclamp=rclamp, learn=False)
+        dv_init = [np.asarray(model_init.activations[l].value) - v_before_init[l]
+                   for l in range(n_layers)]
+
+        for l in range(n_layers):
+            delta_flow[t, l] = np.linalg.norm(dv_local[l] - dv_init[l])
+
+    return delta_flow
 
 
 @hydra.main(config_path="./configs", config_name="relinearization-sweep", version_base=None)
@@ -278,7 +267,15 @@ def main(cfg) -> None:
     make_final_loss_plot(loss_plot_vals, "final_loss_subset.png",
                          figsize=(max(6, 0.75 * len(loss_plot_vals) + 3.75), 5))
 
-    # Per-layer trajectory/pdiff plots (trajectory_plot_vals subset only)
+    # Compute Δflow along the 'relinearize never' trajectory
+    approx_never_hist = [approx_hists[None][l] for l in range(n_layers)]
+    print("Computing trajectory Δflow...")
+    delta_flow = compute_trajectory_delta_flow(
+        graph_def, fp_state, initial_vjps, approx_never_hist,
+        x, k=cfg.approx_pc.k, tau=cfg.dynamics.time_constant, rclamp=rclamp)
+    print("Δflow done.")
+
+    # Per-layer trajectory/pdiff/deltaflow plots (trajectory_plot_vals subset only)
     for layer_idx in range(n_layers):
         pcn_layer = pcn_hist[layer_idx]          # (T_pcn, n_neurons)
         approx_layers = {rs: approx_hists[rs][layer_idx] for rs in traj_plot_vals}
@@ -319,20 +316,6 @@ def main(cfg) -> None:
             if valid:
                 sns.scatterplot(x=proj[valid, 0], y=proj[valid, 1], marker=".", s=25,
                                 color="red", alpha=alpha, zorder=8, ax=ax)
-        grid_n = int(cfg.get("flow_field_grid_n", 15))
-        approx_never_final = [approx_hists[None][l][-1] for l in range(n_layers)]
-        flow_PX, flow_PY, flow_U, flow_V = compute_flow_field(
-            graph_def, fp_state, fp_acts, initial_vjps, layer_idx,
-            x, k=cfg.approx_pc.k, tau=cfg.dynamics.time_constant, rclamp=rclamp,
-            pca_mean=pca_mean, pca_components=pca_components,
-            bounds_from=[pcn_proj] + [project(al) for al in approx_layers.values()],
-            other_acts=approx_never_final, grid_n=grid_n)
-        flow_mag = np.sqrt(flow_U**2 + flow_V**2)
-        flow_mag_safe = np.where(flow_mag == 0, 1, flow_mag)
-        flow_color = flow_mag + flow_mag.max() * 0.5
-        ax.quiver(flow_PX, flow_PY, flow_U / flow_mag_safe, flow_V / flow_mag_safe,
-                  flow_color, cmap="Greys", alpha=0.55, zorder=1,
-                  scale=25, width=0.004)
         ax.set_xlabel("PC 1")
         ax.set_ylabel("PC 2")
         ax.set_aspect("equal")
@@ -366,6 +349,22 @@ def main(cfg) -> None:
         print(f"Saved {out}.png")
         plt.close(fig)
 
+        # Δflow over time
+        fig, ax = plt.subplots(figsize=(8, 3))
+        layer_delta = delta_flow[:, layer_idx]
+        sns.lineplot(x=np.arange(len(layer_delta)), y=layer_delta,
+                     color=layer_palette[layer_labels[layer_idx]], linewidth=1.5, ax=ax)
+        ax.set_xlabel("timestep")
+        ax.set_ylabel(r"$\|\Delta\mathrm{flow}(t)\|$")
+        ax.set_title(title, fontweight="bold")
+        sns.despine(ax=ax)
+        fig.tight_layout()
+        out = out_dir / "deltaflow" / f"layer{layer_idx + 1}"
+        out.parent.mkdir(exist_ok=True)
+        fig.savefig(f"{out}.png", dpi=cfg.dpi, bbox_inches="tight")
+        print(f"Saved {out}.png")
+        plt.close(fig)
+
         # PCA trajectory — side by side
         n_rs = len(traj_plot_vals)
         fig, axes = plt.subplots(1, n_rs, figsize=(3 * n_rs, 5),
@@ -392,9 +391,6 @@ def main(cfg) -> None:
             if valid:
                 sns.scatterplot(x=proj[valid, 0], y=proj[valid, 1], marker=".", s=30,
                                 color="red", zorder=13, ax=ax)
-            ax.quiver(flow_PX, flow_PY, flow_U / flow_mag_safe, flow_V / flow_mag_safe,
-                      flow_color, cmap="Greys", alpha=0.55, zorder=1,
-                      scale=25, width=0.004)
             ax.set_title(rs_label(rs, break_line=True))
             ax.set_xlabel("PC 1")
             ax.set_box_aspect(1)
