@@ -14,7 +14,7 @@ from flax import nnx
 from pathlib import Path
 from tqdm import tqdm
 
-from projectlib.dynamics import approx_pc_step, current_pc_vjp, is_converged, pc_step, run
+from projectlib.dynamics import approx_pc_step, current_pc_vjp, pc_step, run
 from projectlib.models import MLP
 from projectlib.utils import noop
 
@@ -32,6 +32,20 @@ def concatenate_histories(old, new):
     return [jnp.concatenate([o, n[1:]], axis=0) for o, n in zip(old, new)]
 
 
+def dynamics_speed(activations, tolerance_style="norm"):
+    """Compute the same activation-change quantity used by is_converged."""
+    if len(activations[0]) < 2:
+        return np.nan
+    dvs = jnp.array([jnp.sum((act[-1] - act[-2]) ** 2, axis=-1) for act in activations])
+    dv_total = jnp.sum(dvs, axis=0)
+    if tolerance_style == "norm":
+        dist = jnp.sqrt(dv_total)
+    else:
+        n_neurons = sum([act.shape[-1] for act in activations])
+        dist = dv_total / n_neurons
+    return float(jnp.min(dist))
+
+
 def run_pcn(model, x, rclamp, cfg):
     _, history, _ = run(model, pc_step, x,
                         max_timesteps=cfg.dynamics.clamp_timesteps,
@@ -46,14 +60,16 @@ def run_approx(model, x, rclamp, cfg, relinearize_steps, pbar=None):
     """Run approx-PC, re-linearizing every relinearize_steps steps (None = once).
 
     Stops early if the system converges before exhausting clamp_timesteps.
-    Returns (history, n_relinearizations) where n_relinearizations excludes the
-    initial linearization (i.e., counts only subsequent re-linearizations).
+    Returns (history, n_relinearizations, segment_stats) where
+    n_relinearizations excludes the initial linearization and segment_stats has
+    one entry per linearized segment.
     """
     total_timesteps = int(cfg.dynamics.clamp_timesteps)
     step_size = relinearize_steps or total_timesteps
     remaining = total_timesteps
     history = None
     n_vjp = 0
+    segment_stats = []
     while remaining > 0:
         n = min(step_size, remaining)
         vjps = current_pc_vjp(model, x)
@@ -61,19 +77,28 @@ def run_approx(model, x, rclamp, cfg, relinearize_steps, pbar=None):
         _, seg, t = run(model, approx_pc_step, x,
                         vjps=vjps, k=cfg.approx_pc.k,
                         max_timesteps=n,
+                        min_timesteps=1,
                         tolerance=cfg.dynamics.convergence_tolerance,
                         tau=cfg.dynamics.time_constant,
                         learn=False, rclamp=rclamp,
                         return_act_history=True,
                         disable_tqdm=True)
+        speed = dynamics_speed(seg, "norm")
+        converged = speed < float(cfg.dynamics.convergence_tolerance)
+        segment_stats.append({
+            "speed": speed,
+            "converged": converged,
+            "steps": int(t),
+            "max_steps": int(n),
+        })
         history = concatenate_histories(history, seg)
         remaining -= t
         if pbar is not None:
             pbar.update(t)
-        if (step_size == total_timesteps) or is_converged(seg, cfg.dynamics.convergence_tolerance, "norm"):
+        if (step_size == total_timesteps) or converged:
             break
     n_relinearizations = max(0, n_vjp - 1)
-    return [np.asarray(h) for h in history], n_relinearizations
+    return [np.asarray(h) for h in history], n_relinearizations, segment_stats
 
 
 def fit_pca(arrays):
@@ -160,13 +185,15 @@ def main(cfg) -> None:
                       for rs in cfg.get("loss_plot_vals", cfg.relinearize_steps_sweep)]
     approx_hists = {}
     approx_relin_counts = {}
+    approx_segment_stats = {}
     for rs in relinearize_steps_sweep:
         with tqdm(total=int(cfg.dynamics.clamp_timesteps),
                   desc=f"approx-PC  rs={rs_label(rs)}") as pbar:
             approx_model = nnx.merge(graph_def, fp_state)
-            hist, n_relin = run_approx(approx_model, x, rclamp, cfg, rs, pbar=pbar)
+            hist, n_relin, segment_stats = run_approx(approx_model, x, rclamp, cfg, rs, pbar=pbar)
             approx_hists[rs] = hist
             approx_relin_counts[rs] = n_relin
+            approx_segment_stats[rs] = segment_stats
 
     palette = sns.light_palette("seagreen", len(traj_plot_vals) + 1)[1:]
 
@@ -218,6 +245,79 @@ def main(cfg) -> None:
                          figsize=(max(6, 0.7 * len(relinearize_steps_sweep) + 3.5), 5))
     make_final_loss_plot(loss_plot_vals, "final_loss_subset.png",
                          figsize=(max(6, 0.75 * len(loss_plot_vals) + 3.75), 5))
+
+    x_labels = ["never" if rs is None else str(rs) for rs in relinearize_steps_sweep]
+    convergence_percentages = []
+    average_speeds = []
+    for rs in relinearize_steps_sweep:
+        segment_stats = approx_segment_stats[rs]
+        convergence_percentages.append(
+            100.0 * np.mean([stat["converged"] for stat in segment_stats])
+        )
+        average_speeds.append(np.mean([stat["speed"] for stat in segment_stats]))
+
+    finite_pairs = [
+        (label, pct)
+        for rs, label, pct in zip(relinearize_steps_sweep, x_labels, convergence_percentages)
+        if rs is not None
+    ]
+    conv_x_labels = [label for label, _ in finite_pairs]
+    conv_percentages = [pct for _, pct in finite_pairs]
+    fig, ax = plt.subplots(figsize=(max(6, 0.7 * len(conv_x_labels) + 2), 3.5))
+    sns.barplot(x=conv_x_labels, y=conv_percentages, color="#4daf4a", ax=ax)
+    ax.set_xlabel("Relinearization Frequency (steps)")
+    ax.set_ylabel("% segments converged")
+    if conv_percentages:
+        y_min = min(conv_percentages)
+        y_max = max(conv_percentages)
+        pad = max(2.0, 0.12 * max(y_max - y_min, 1.0))
+        ax.set_ylim(max(0, y_min - pad), min(100, y_max + pad))
+    ax.set_title("Segment convergence rate", fontweight="bold")
+    plt.xticks(rotation=45, ha="right")
+    sns.despine(ax=ax)
+    fig.tight_layout()
+    out = out_dir / "relinearization_convergence_rate.png"
+    fig.savefig(out, dpi=cfg.dpi, bbox_inches="tight")
+    print(f"Saved {out}")
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(max(6, 0.7 * len(relinearize_steps_sweep) + 2), 3.5))
+    sns.barplot(x=x_labels, y=average_speeds, color="#4daf4a", ax=ax)
+    ax.axhline(float(cfg.dynamics.convergence_tolerance), color="#7a7a7a",
+               linewidth=0.9, linestyle="--", alpha=0.65)
+    ax.set_xlabel("Relinearization Frequency (steps)")
+    ax.set_ylabel(r"Mean $\|\Delta \mathbf{v}\|$")
+    ax.set_yscale("log")
+    ax.set_title("Average segment-end dynamics speed", fontweight="bold")
+    plt.xticks(rotation=45, ha="right")
+    sns.despine(ax=ax)
+    fig.tight_layout()
+    out = out_dir / "relinearization_average_speed.png"
+    fig.savefig(out, dpi=cfg.dpi, bbox_inches="tight")
+    print(f"Saved {out}")
+    plt.close(fig)
+
+    finite_rs = [rs for rs in relinearize_steps_sweep if rs is not None]
+    fig, ax = plt.subplots(figsize=(max(6, 0.75 * len(finite_rs) + 3), 3.5))
+    speed_palette = sns.light_palette("seagreen", len(finite_rs) + 1)[1:]
+    for rs, color in zip(finite_rs, speed_palette):
+        speeds = [stat["speed"] for stat in approx_segment_stats[rs]]
+        sns.lineplot(x=np.arange(1, len(speeds) + 1), y=speeds,
+                     marker=None, linewidth=1.5, color=color,
+                     label=rs_label(rs), sort=False, ax=ax)
+    ax.axhline(float(cfg.dynamics.convergence_tolerance), color="#7a7a7a",
+               linewidth=0.9, linestyle="--", alpha=0.65)
+    ax.set_xlabel("Segment Number")
+    ax.set_ylabel(r"$\|\Delta \mathbf{v}\|$")
+    ax.set_yscale("log")
+    ax.set_title("Dynamics speed by segment", fontweight="bold")
+    ax.legend(frameon=False, loc="upper left", bbox_to_anchor=(1, 1))
+    sns.despine(ax=ax)
+    fig.tight_layout()
+    out = out_dir / "relinearization_speed_by_segment.png"
+    fig.savefig(out, dpi=cfg.dpi, bbox_inches="tight")
+    print(f"Saved {out}")
+    plt.close(fig)
 
     # Per-layer trajectory/pdiff plots (trajectory_plot_vals subset only)
     for layer_idx in range(n_layers):
