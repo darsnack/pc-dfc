@@ -106,8 +106,11 @@ def plot_scaling_factor_lines(sim_data: dict,
 
     sim_data["diff_matrix"] shape is:
       [relinearize_steps, scaling_factor, noise, network_layer]
+    sim_data["approx_nudge_counts"] shape is:
+      [relinearize_steps][scaling_factor][noise] → int (total nudge count)
     """
     diff_matrix = np.asarray(sim_data["diff_matrix"])
+    approx_nudge_counts = sim_data["approx_nudge_counts"]
     sf_sweep = [float(x) for x in sim_data["scaling_factor_sweep"]]
     noise_sweep = [float(x) for x in sim_data["noise_sweep"]]
     layer_labels = [str(x) for x in sim_data["layer_labels"]]
@@ -117,7 +120,7 @@ def plot_scaling_factor_lines(sim_data: dict,
     layer_palette = dict(zip(layer_labels, sns.light_palette("seagreen", len(layer_labels) + 1)[1:]))
 
     for noise_idx, noise in enumerate(noise_sweep):
-        fig, ax = plt.subplots(figsize=(max(6, 0.6 * len(sf_sweep) + 2), 3.5))
+        fig, ax = plt.subplots(figsize=(max(6, 0.8 * len(sf_sweep) + 3.5), 5))
         for layer_idx, layer_label in enumerate(layer_labels):
             final_diffs = diff_matrix[rs_idx, :, noise_idx, layer_idx]
             sns.lineplot(x=x_labels, y=final_diffs, marker="o", linewidth=1.5,
@@ -130,10 +133,25 @@ def plot_scaling_factor_lines(sim_data: dict,
         ax.set_xlabel("Scaling factor")
         ax.set_ylabel(r"$\|\mathbf{v}_\mathrm{approx}^T - \mathbf{v}_\mathrm{PCN}^T\|$")
         ax.set_title(f"Final activation diff  |  layers={total_layers}  |  noise={noise:.2f}  |  rs={rs_label}",
-                     fontweight="bold")
-        ax.legend(frameon=False, loc="upper left", bbox_to_anchor=(1, 1))
+                     pad=20, fontweight="bold")
+        ax.legend(frameon=False, loc="upper left", bbox_to_anchor=(1.2, 1))
         plt.xticks(rotation=45, ha="right")
         sns.despine(ax=ax)
+
+        ax_nudge = ax.twinx()
+        nudge_counts = [approx_nudge_counts[rs_idx][sf_idx][noise_idx]
+                        for sf_idx in range(len(sf_sweep))]
+        ax_nudge.plot(x_labels, nudge_counts, marker="s", linestyle="--",
+                      color="#7a7a7a", linewidth=1.2, markersize=5, zorder=5)
+        ax_nudge.set_ylim(0.9, None)
+        ax_nudge.set_yscale("log")
+        ax_nudge.set_ylabel("# of Nudges")
+        nudge_handle = plt.Line2D([], [], color="#7a7a7a", marker="s", linestyle="--",
+                                   linewidth=1.2, markersize=5, label="Nudges")
+        ax_nudge.legend(handles=[nudge_handle], frameon=False, loc="lower left",
+                        bbox_to_anchor=(1.2, 0))
+        plt.xticks(rotation=45, ha="right")
+
         fig.tight_layout()
 
         noise_tag = f"{noise:g}".replace(".", "p").replace("-", "m")
@@ -148,7 +166,7 @@ def main(cfg) -> None:
     if not base_dir.exists():
         raise FileNotFoundError(f"Experiment directory does not exist: {base_dir}")
 
-    sns.set_context("paper")
+    sns.set_context("paper", font_scale=2)
     sns.set_style("ticks")
     sns.set_palette("colorblind")
 

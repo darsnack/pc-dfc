@@ -101,7 +101,7 @@ def run_approx_clamped(model, x, rclamp, cfg, relinearize_steps, scaling_factor,
             pbar.update(1)
         if float(jnp.linalg.norm(current_output - rclamp)) < cfg.approx_pc.nudge.convergence_tolerance:
             break
-    return combined_history, nudge_step_counts
+    return combined_history, nudge_count, nudge_step_counts
 
 
 def run_single_simulation(layer_dims, cfg):
@@ -154,6 +154,10 @@ def run_single_simulation(layer_dims, cfg):
         [[] for _ in range(n_sf)]
         for _ in range(n_rs)
     ]
+    approx_nudge_counts = [
+        [[] for _ in range(n_sf)]
+        for _ in range(n_rs)
+    ]
     diff_matrix = np.zeros((n_rs, n_sf, n_noise, n_layers))
 
     for noise_idx, magnitude in enumerate(noise_sweep):
@@ -169,9 +173,10 @@ def run_single_simulation(layer_dims, cfg):
                 desc = f"noise={magnitude:.2f}  rs={rs_str}  sf={sf:.2f}"
                 with tqdm(total=cfg.approx_pc.nudge.max_count, desc=desc, unit="nudge") as pbar:
                     approx_model = nnx.merge(graph_def, fp_state)
-                    approx_hist, nudge_steps = run_approx_clamped(approx_model, x, rclamp_final, cfg, rs, sf, pbar=pbar)
+                    approx_hist, nudge_count, nudge_steps = run_approx_clamped(approx_model, x, rclamp_final, cfg, rs, sf, pbar=pbar)
                 approx_sweep_history[rs_idx][sf_idx].append(to_numpy(approx_hist))
                 approx_nudge_steps[rs_idx][sf_idx].append(nudge_steps)
+                approx_nudge_counts[rs_idx][sf_idx].append(nudge_count)
                 for layer_idx in range(n_layers):
                     err = float(jnp.linalg.norm(
                         pcn_hist[layer_idx][-1] - approx_hist[layer_idx][-1]
@@ -195,6 +200,7 @@ def run_single_simulation(layer_dims, cfg):
         "pcn_sweep_history": pcn_sweep_history,
         "approx_sweep_history": approx_sweep_history,
         "approx_nudge_steps": approx_nudge_steps,
+        "approx_nudge_counts": approx_nudge_counts,
         "diff_matrix": diff_matrix,
     }
 

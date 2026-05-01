@@ -12,7 +12,7 @@ sf: 1.0           # scaling_factor
 noise: 1.0        # noise magnitude
 layers: 6         # total layer count; also selects network for scaling-factor line plots
 lineplot_rs: null # relinearize_steps slice for scaling-factor line plots
-convergence_tolerance: 1e-5
+convergence_tolerance: 1e-10
 dpi: 300
 hydra:
   output_subdir: null

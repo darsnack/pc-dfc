@@ -45,18 +45,21 @@ def run_pcn(model, x, rclamp, cfg):
 def run_approx(model, x, rclamp, cfg, relinearize_steps, pbar=None):
     """Run approx-PC, re-linearizing every relinearize_steps steps (None = once).
 
-    Always runs exactly clamp_timesteps total steps for a fair comparison.
+    Stops early if the system converges before exhausting clamp_timesteps.
+    Returns (history, n_relinearizations) where n_relinearizations excludes the
+    initial linearization (i.e., counts only subsequent re-linearizations).
     """
     total_timesteps = int(cfg.dynamics.clamp_timesteps)
     step_size = relinearize_steps or total_timesteps
     remaining = total_timesteps
     history = None
+    n_vjp = 0
     while remaining > 0:
         n = min(step_size, remaining)
         vjps = current_pc_vjp(model, x)
+        n_vjp += 1
         _, seg, t = run(model, approx_pc_step, x,
                         vjps=vjps, k=cfg.approx_pc.k,
-                        min_timesteps=n,
                         max_timesteps=n,
                         tolerance=cfg.dynamics.convergence_tolerance,
                         tau=cfg.dynamics.time_constant,
@@ -67,7 +70,10 @@ def run_approx(model, x, rclamp, cfg, relinearize_steps, pbar=None):
         remaining -= t
         if pbar is not None:
             pbar.update(t)
-    return [np.asarray(h) for h in history]
+        if (step_size == total_timesteps) or is_converged(seg, cfg.dynamics.convergence_tolerance, "norm"):
+            break
+    n_relinearizations = max(0, n_vjp - 1)
+    return [np.asarray(h) for h in history], n_relinearizations
 
 
 def fit_pca(arrays):
@@ -153,11 +159,14 @@ def main(cfg) -> None:
     loss_plot_vals = [None if rs is None else int(rs)
                       for rs in cfg.get("loss_plot_vals", cfg.relinearize_steps_sweep)]
     approx_hists = {}
+    approx_relin_counts = {}
     for rs in relinearize_steps_sweep:
         with tqdm(total=int(cfg.dynamics.clamp_timesteps),
                   desc=f"approx-PC  rs={rs_label(rs)}") as pbar:
             approx_model = nnx.merge(graph_def, fp_state)
-            approx_hists[rs] = run_approx(approx_model, x, rclamp, cfg, rs, pbar=pbar)
+            hist, n_relin = run_approx(approx_model, x, rclamp, cfg, rs, pbar=pbar)
+            approx_hists[rs] = hist
+            approx_relin_counts[rs] = n_relin
 
     palette = sns.light_palette("seagreen", len(traj_plot_vals) + 1)[1:]
 
@@ -179,10 +188,26 @@ def main(cfg) -> None:
         ax_loss.set_xlabel("Relinearization Frequency (steps)")
         ax_loss.set_ylabel(r"$\|\mathbf{v}_\mathrm{approx}^T - \mathbf{v}_\mathrm{PCN}^T\|$")
         ax_loss.set_yscale("log")
-        ax_loss.set_title(f"Final activation diff  |  noise={cfg.noise:.2f}", fontweight="bold")
-        ax_loss.legend(frameon=False, loc="upper left", bbox_to_anchor=(1, 1))
+        ax_loss.set_title(f"Final activation diff  |  noise={cfg.noise:.2f}", pad=20, fontweight="bold")
+        ax_loss.legend(frameon=False, loc="upper left", bbox_to_anchor=(1.3, 1))
         plt.xticks(rotation=45, ha="right")
         sns.despine(ax=ax_loss)
+
+        rs_relin = [rs for rs in rs_values if rs is not None]
+        relin_x_labels = [str(rs) for rs in rs_relin]
+        relin_counts = [approx_relin_counts[rs] for rs in rs_relin]
+        ax_relin = ax_loss.twinx()
+        ax_relin.plot(relin_x_labels, relin_counts, marker="s", linestyle="--",
+                      color="#7a7a7a", linewidth=1.2, markersize=5, zorder=5)
+        ax_relin.set_ylim(0.9, None)
+        ax_relin.set_yscale("log")
+        ax_relin.set_ylabel("# of Relinearizations")
+        relin_handle = plt.Line2D([], [], color="#7a7a7a", marker="s", linestyle="--",
+                                   linewidth=1.2, markersize=5, label="Re-linearizations")
+        ax_relin.legend(handles=[relin_handle], frameon=False, loc="lower left",
+                        bbox_to_anchor=(1.3, 0))
+        plt.xticks(rotation=45, ha="right")
+
         fig_loss.tight_layout()
         out_loss = out_dir / filename
         fig_loss.savefig(out_loss, dpi=cfg.dpi, bbox_inches="tight")
@@ -190,9 +215,9 @@ def main(cfg) -> None:
         plt.close(fig_loss)
 
     make_final_loss_plot(relinearize_steps_sweep, "final_loss.png",
-                         figsize=(max(6, 0.6 * len(relinearize_steps_sweep) + 2), 3.5))
+                         figsize=(max(6, 0.7 * len(relinearize_steps_sweep) + 3.5), 5))
     make_final_loss_plot(loss_plot_vals, "final_loss_subset.png",
-                         figsize=(max(6, 0.6 * len(loss_plot_vals) + 3), 4))
+                         figsize=(max(6, 0.75 * len(loss_plot_vals) + 3.75), 5))
 
     # Per-layer trajectory/pdiff plots (trajectory_plot_vals subset only)
     for layer_idx in range(n_layers):

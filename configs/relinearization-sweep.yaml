@@ -8,16 +8,16 @@ model:
 dynamics:
   time_constant: 10.0
   free_min_timesteps: 10
-  free_max_timesteps: 5000
-  clamp_timesteps: 5000
-  convergence_tolerance: 1e-5
+  free_max_timesteps: 100000
+  clamp_timesteps: 100000
+  convergence_tolerance: 1e-8
 approx_pc:
   k: 1.0
 noise: 1.0
-relinearize_steps_sweep: [null, 250, 200, 150, 100, 75, 50, 25, 10, 5, 1]  # null = one linearization for full run
-trajectory_plot_vals: [null, 50, 5, 1]     # subset of sweep to show in traj/pdiff plots
-loss_plot_vals: [null, 150, 75, 25, 5, 1]           # subset of sweep to show in final_loss_subset plot
-dpi: 150
+relinearize_steps_sweep: [null, 150, 100, 75, 50, 25, 10, 5, 1] # null = one linearization for full run
+trajectory_plot_vals: [null, 50, 25, 1]     # subset of sweep to show in traj/pdiff plots
+loss_plot_vals: [null, 150, 75, 25, 5, 1]   # subset of sweep to show in final_loss_subset plot
+dpi: 300
 hydra:
   job:
     chdir: true

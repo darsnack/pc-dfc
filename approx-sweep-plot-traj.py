@@ -80,7 +80,7 @@ def main(cfg) -> None:
     if not base_dir.exists():
         raise FileNotFoundError(f"Experiment directory does not exist: {base_dir}")
 
-    sns.set_context("paper")
+    sns.set_context("paper", font_scale=2)
     sns.set_style("ticks")
     sns.set_palette("colorblind")
 
@@ -186,8 +186,7 @@ def main(cfg) -> None:
     fig_pca, axes_pca = plt.subplots(1, n_layers,
                                      figsize=(4.5 * n_layers, 4.5),
                                      squeeze=False)
-    fig_pca.suptitle(f"Clamped-phase PCA  |  {title_suffix}",
-                     fontsize=10, fontweight="bold")
+    fig_pca.suptitle(f"Clamped-phase PCA  |  {title_suffix}", fontweight="bold")
     for layer_idx in range(n_layers):
         ax = axes_pca[0, layer_idx]
         pcn_layer    = pcn_hist[layer_idx]
@@ -217,21 +216,29 @@ def main(cfg) -> None:
         valid_relin = [i for i in relin_idx if i < len(approx_proj)]
         if valid_relin:
             ax.scatter(approx_proj[valid_relin, 0], approx_proj[valid_relin, 1],
-                       marker=".", s=60, color=relin_color, zorder=8, label="Re-linearization")
+                       marker=".", s=60, color=relin_color, zorder=8, label="Relinearization")
         # nudge boundary markers
-        nudge_idx = nudge_boundary_indices(nudge_steps, T_approx)
-        valid_nudge = [i for i in nudge_idx if i < len(approx_proj)]
-        if valid_nudge:
-            ax.scatter(approx_proj[valid_nudge, 0], approx_proj[valid_nudge, 1],
-                       marker="^", s=80, color=nudge_color, zorder=9, label="Nudge boundary")
-        ax.set_xlabel("PC 1", fontsize=9)
-        ax.set_ylabel("PC 2" if n_components >= 2 else "(1D only)", fontsize=9)
-        ax.set_title(layer_labels[layer_idx], fontsize=9)
+        # nudge_idx = nudge_boundary_indices(nudge_steps, T_approx)
+        # valid_nudge = [i for i in nudge_idx if i < len(approx_proj)]
+        # if valid_nudge:
+        #     ax.scatter(approx_proj[valid_nudge, 0], approx_proj[valid_nudge, 1],
+        #                marker="^", s=80, color=nudge_color, zorder=9, label="Nudge boundary")
+        ax.set_xlabel("PC 1")
+        ax.set_ylabel("PC 2" if n_components >= 2 else "(1D only)")
+        ax.set_title(layer_labels[layer_idx])
         ax.set_box_aspect(1)
-        ax.legend(fontsize=7, frameon=False, loc="best")
         sns.despine(ax=ax, offset=10)
 
-    fig_pca.tight_layout()
+    handles, labels = [], []
+    for ax in axes_pca.flat:
+        h, l = ax.get_legend_handles_labels()
+        for hi, li in zip(h, l):
+            if li not in labels:
+                handles.append(hi)
+                labels.append(li)
+    fig_pca.legend(handles, labels, frameon=False, loc="lower center",
+                   ncol=len(labels), bbox_to_anchor=(0.5, -0.02))
+    fig_pca.tight_layout(rect=[0, 0.06, 1, 1])
     save_fig(fig_pca, out_dir / "dynamics_pca", cfg.dpi)
     plt.close(fig_pca)
 
