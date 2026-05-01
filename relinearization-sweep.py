@@ -3,6 +3,7 @@
 For each layer, produces:
   - traj_layer{N}.png  : PCA-projected clamped-phase trajectories, one line per relinearize_steps
   - pdiff_layer{N}.png : ||approx_acts[t] - pcn_acts[t]|| over time, one line per relinearize_steps
+  - deltaflow_layer{N}.png : ||Δflow_l(t)|| over time along the 'relinearize never' trajectory
 """
 import hydra
 import jax.numpy as jnp
@@ -102,11 +103,12 @@ def run_approx(model, x, rclamp, cfg, relinearize_steps, pbar=None):
 
 
 def fit_pca(arrays):
-    """Fit PCA on concatenated arrays; return project() fn."""
+    """Fit PCA on concatenated arrays; return (project, mean, components)."""
     combined = np.concatenate(arrays, axis=0)
     mean = combined.mean(axis=0)
     n_dim = combined.shape[1]
     if n_dim == 1:
+        components = np.array([[1.0], [0.0]])
         def project(t):
             return np.column_stack([np.asarray(t) - mean, np.zeros(len(t))])
     else:
@@ -114,7 +116,7 @@ def fit_pca(arrays):
         components = vt[:2]
         def project(t):
             return (np.asarray(t) - mean) @ components.T
-    return project
+    return project, mean, components
 
 
 def rs_label(rs, break_line=False):
@@ -127,6 +129,50 @@ def relinearization_indices(rs, total_timesteps):
     """Indices into the history array where re-linearization occurred."""
     step_size = rs or total_timesteps
     return list(range(0, total_timesteps, step_size))
+
+
+def compute_trajectory_delta_flow(graph_def, fp_state, initial_vjps,
+                                  approx_never_hist, x, k, tau, rclamp):
+    """Compute ||Δflow|| at each timestep along the 'relinearize never' trajectory.
+
+    At each timestep t, compares one step of approx_pc_step with VJPs
+    recomputed at the trajectory state vs. with the initial (frozen) VJPs.
+    Returns array of shape (T, n_layers) with ||Δdv_l(t)|| per layer.
+    """
+    n_layers = len(approx_never_hist)
+    T = approx_never_hist[0].shape[0]
+    delta_flow = np.zeros((T, n_layers))
+
+    for t in range(T):
+        model_local = nnx.merge(graph_def, fp_state)
+        for l in range(n_layers):
+            model_local.activations[l].value = jnp.asarray(approx_never_hist[l][t])
+        if rclamp is not None:
+            model_local.activations[-1].value = jnp.asarray(rclamp)
+        local_vjps = current_pc_vjp(model_local, x)
+
+        v_before_local = [np.asarray(model_local.activations[l].value) for l in range(n_layers)]
+        approx_pc_step(model_local, x, vjps=local_vjps, k=k, tau=tau,
+                       rclamp=rclamp, learn=False)
+        dv_local = [np.asarray(model_local.activations[l].value) - v_before_local[l]
+                    for l in range(n_layers)]
+
+        model_init = nnx.merge(graph_def, fp_state)
+        for l in range(n_layers):
+            model_init.activations[l].value = jnp.asarray(approx_never_hist[l][t])
+        if rclamp is not None:
+            model_init.activations[-1].value = jnp.asarray(rclamp)
+
+        v_before_init = [np.asarray(model_init.activations[l].value) for l in range(n_layers)]
+        approx_pc_step(model_init, x, vjps=initial_vjps, k=k, tau=tau,
+                       rclamp=rclamp, learn=False)
+        dv_init = [np.asarray(model_init.activations[l].value) - v_before_init[l]
+                   for l in range(n_layers)]
+
+        for l in range(n_layers):
+            delta_flow[t, l] = np.linalg.norm(dv_local[l] - dv_init[l])
+
+    return delta_flow
 
 
 @hydra.main(config_path="./configs", config_name="relinearization-sweep", version_base=None)
@@ -165,6 +211,8 @@ def main(cfg) -> None:
 
     fp_acts = model.get_activations()
     graph_def, fp_state = nnx.split(model)
+
+    initial_vjps = current_pc_vjp(model, x)
 
     # Clamp target
     noise_dir = jrng.normal(rng_n, fp_acts[-1].shape)
@@ -320,13 +368,22 @@ def main(cfg) -> None:
     plt.close(fig)
 
     # Per-layer trajectory/pdiff plots (trajectory_plot_vals subset only)
+    # Compute Δflow along the 'relinearize never' trajectory
+    approx_never_hist = [approx_hists[None][l] for l in range(n_layers)]
+    print("Computing trajectory Δflow...")
+    delta_flow = compute_trajectory_delta_flow(
+        graph_def, fp_state, initial_vjps, approx_never_hist,
+        x, k=cfg.approx_pc.k, tau=cfg.dynamics.time_constant, rclamp=rclamp)
+    print("Δflow done.")
+
+    # Per-layer trajectory/pdiff/deltaflow plots (trajectory_plot_vals subset only)
     for layer_idx in range(n_layers):
         pcn_layer = pcn_hist[layer_idx]          # (T_pcn, n_neurons)
         approx_layers = {rs: approx_hists[rs][layer_idx] for rs in traj_plot_vals}
         title = f"{layer_labels[layer_idx]}  |  noise={cfg.noise:.2f}"
 
         # PCA trajectory overlay
-        project = fit_pca([pcn_layer] + list(approx_layers.values()))
+        project, pca_mean, pca_components = fit_pca([pcn_layer] + list(approx_layers.values()))
         pcn_proj = project(pcn_layer)
 
         # assign alphas: smaller relinearize_steps → higher alpha
@@ -388,6 +445,22 @@ def main(cfg) -> None:
         sns.despine(ax=ax)
         fig.tight_layout()
         out = out_dir / "pdiff" / f"layer{layer_idx + 1}"
+        out.parent.mkdir(exist_ok=True)
+        fig.savefig(f"{out}.png", dpi=cfg.dpi, bbox_inches="tight")
+        print(f"Saved {out}.png")
+        plt.close(fig)
+
+        # Δflow over time
+        fig, ax = plt.subplots(figsize=(8, 3))
+        layer_delta = delta_flow[:, layer_idx]
+        sns.lineplot(x=np.arange(len(layer_delta)), y=layer_delta,
+                     color=layer_palette[layer_labels[layer_idx]], linewidth=1.5, ax=ax)
+        ax.set_xlabel("timestep")
+        ax.set_ylabel(r"$\|\Delta\mathrm{flow}(t)\|$")
+        ax.set_title(title, fontweight="bold")
+        sns.despine(ax=ax)
+        fig.tight_layout()
+        out = out_dir / "deltaflow" / f"layer{layer_idx + 1}"
         out.parent.mkdir(exist_ok=True)
         fig.savefig(f"{out}.png", dpi=cfg.dpi, bbox_inches="tight")
         print(f"Saved {out}.png")
