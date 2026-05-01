@@ -77,11 +77,12 @@ def run_approx(model, x, rclamp, cfg, relinearize_steps, pbar=None):
 
 
 def fit_pca(arrays):
-    """Fit PCA on concatenated arrays; return project() fn."""
+    """Fit PCA on concatenated arrays; return (project, mean, components)."""
     combined = np.concatenate(arrays, axis=0)
     mean = combined.mean(axis=0)
     n_dim = combined.shape[1]
     if n_dim == 1:
+        components = np.array([[1.0], [0.0]])
         def project(t):
             return np.column_stack([np.asarray(t) - mean, np.zeros(len(t))])
     else:
@@ -89,7 +90,7 @@ def fit_pca(arrays):
         components = vt[:2]
         def project(t):
             return (np.asarray(t) - mean) @ components.T
-    return project
+    return project, mean, components
 
 
 def rs_label(rs, break_line=False):
@@ -102,6 +103,62 @@ def relinearization_indices(rs, total_timesteps):
     """Indices into the history array where re-linearization occurred."""
     step_size = rs or total_timesteps
     return list(range(0, total_timesteps, step_size))
+
+
+def unproject(p, mean, components):
+    """Map 2D PCA point(s) back to the original activation space."""
+    return np.asarray(p) @ components + mean
+
+
+def compute_flow_field(graph_def, fp_state, fp_acts, initial_vjps, layer_idx,
+                        x, k, tau, rclamp, pca_mean, pca_components,
+                        bounds_from, other_acts, grid_n=15, padding=0.3):
+    """Compute a conditional flow field for one layer in PCA space.
+
+    Uses approx_pc_step directly with frozen initial VJPs (no reimplementation).
+    Other layers are held at other_acts (should be the approx-PC fixed point
+    for the flow field to have the correct equilibrium).
+    Returns (PX, PY, U, V) for ax.quiver.
+    """
+    all_proj = np.concatenate(bounds_from, axis=0)
+    x_min, x_max = all_proj[:, 0].min(), all_proj[:, 0].max()
+    y_min, y_max = all_proj[:, 1].min(), all_proj[:, 1].max()
+    dx = max(x_max - x_min, 1e-6)
+    dy = max(y_max - y_min, 1e-6)
+    x_min -= padding * dx
+    x_max += padding * dx
+    y_min -= padding * dy
+    y_max += padding * dy
+
+    px = np.linspace(x_min, x_max, grid_n)
+    py = np.linspace(y_min, y_max, grid_n)
+    PX, PY = np.meshgrid(px, py)
+    grid_points = np.column_stack([PX.ravel(), PY.ravel()])
+
+    v_targets = unproject(grid_points, pca_mean, pca_components)
+
+    U = np.zeros((grid_n, grid_n))
+    V = np.zeros((grid_n, grid_n))
+
+    for idx in range(len(grid_points)):
+        i, j = divmod(idx, grid_n)
+        model = nnx.merge(graph_def, fp_state)
+        for l, a in enumerate(other_acts):
+            model.activations[l].value = jnp.asarray(a)
+        model.activations[layer_idx].value = jnp.asarray(v_targets[idx])
+        if rclamp is not None:
+            model.activations[-1].value = jnp.asarray(rclamp)
+
+        v_before = np.asarray(model.activations[layer_idx].value)
+        approx_pc_step(model, x, vjps=initial_vjps, k=k, tau=tau,
+                        rclamp=rclamp, learn=False)
+        v_after = np.asarray(model.activations[layer_idx].value)
+        dv = v_after - v_before
+        dp = dv @ pca_components.T
+        U[i, j] = dp[0]
+        V[i, j] = dp[1]
+
+    return PX, PY, U, V
 
 
 @hydra.main(config_path="./configs", config_name="relinearization-sweep", version_base=None)
@@ -140,6 +197,8 @@ def main(cfg) -> None:
 
     fp_acts = model.get_activations()
     graph_def, fp_state = nnx.split(model)
+
+    initial_vjps = current_pc_vjp(model, x)
 
     # Clamp target
     noise_dir = jrng.normal(rng_n, fp_acts[-1].shape)
@@ -226,7 +285,7 @@ def main(cfg) -> None:
         title = f"{layer_labels[layer_idx]}  |  noise={cfg.noise:.2f}"
 
         # PCA trajectory overlay
-        project = fit_pca([pcn_layer] + list(approx_layers.values()))
+        project, pca_mean, pca_components = fit_pca([pcn_layer] + list(approx_layers.values()))
         pcn_proj = project(pcn_layer)
 
         # assign alphas: smaller relinearize_steps → higher alpha
@@ -260,6 +319,20 @@ def main(cfg) -> None:
             if valid:
                 sns.scatterplot(x=proj[valid, 0], y=proj[valid, 1], marker=".", s=25,
                                 color="red", alpha=alpha, zorder=8, ax=ax)
+        grid_n = int(cfg.get("flow_field_grid_n", 15))
+        approx_never_final = [approx_hists[None][l][-1] for l in range(n_layers)]
+        flow_PX, flow_PY, flow_U, flow_V = compute_flow_field(
+            graph_def, fp_state, fp_acts, initial_vjps, layer_idx,
+            x, k=cfg.approx_pc.k, tau=cfg.dynamics.time_constant, rclamp=rclamp,
+            pca_mean=pca_mean, pca_components=pca_components,
+            bounds_from=[pcn_proj] + [project(al) for al in approx_layers.values()],
+            other_acts=approx_never_final, grid_n=grid_n)
+        flow_mag = np.sqrt(flow_U**2 + flow_V**2)
+        flow_mag_safe = np.where(flow_mag == 0, 1, flow_mag)
+        flow_color = flow_mag + flow_mag.max() * 0.5
+        ax.quiver(flow_PX, flow_PY, flow_U / flow_mag_safe, flow_V / flow_mag_safe,
+                  flow_color, cmap="Greys", alpha=0.55, zorder=1,
+                  scale=25, width=0.004)
         ax.set_xlabel("PC 1")
         ax.set_ylabel("PC 2")
         ax.set_aspect("equal")
@@ -319,6 +392,9 @@ def main(cfg) -> None:
             if valid:
                 sns.scatterplot(x=proj[valid, 0], y=proj[valid, 1], marker=".", s=30,
                                 color="red", zorder=13, ax=ax)
+            ax.quiver(flow_PX, flow_PY, flow_U / flow_mag_safe, flow_V / flow_mag_safe,
+                      flow_color, cmap="Greys", alpha=0.55, zorder=1,
+                      scale=25, width=0.004)
             ax.set_title(rs_label(rs, break_line=True))
             ax.set_xlabel("PC 1")
             ax.set_box_aspect(1)
