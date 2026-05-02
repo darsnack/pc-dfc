@@ -7,13 +7,19 @@ import jax.numpy as jnp
 import jax.random as jrng
 import orbax.checkpoint as ocp
 from flax import nnx
+from optax.losses import softmax_cross_entropy
 from omegaconf import OmegaConf
 from tqdm.auto import tqdm
 
 from projectlib.models import MLP, Activation
 from projectlib.dynamics import pc_step, current_pc_vjp, approx_pc_step, run
 from projectlib.data import load_dataset, build_dataloader, default_data_transforms
-from projectlib.utils import noop, get_model_params, compute_param_change_norm, accuracy, save_checkpoint
+from projectlib.utils import (noop,
+                              get_model_params,
+                              compute_param_change_norm,
+                              accuracy,
+                              save_checkpoint,
+                              mse)
 
 
 def load_checkpoint(checkpoint_path, model, sample_input=None):
@@ -36,10 +42,11 @@ def load_checkpoint(checkpoint_path, model, sample_input=None):
     return model, None
 
 def runs_with_nudges(cfg, rngs, x, y, model, v_fp, vjps, epoch, sample_idx,
-                     integration_step):
+                     integration_step, loss_fn = mse):
     # Keep nudging toward current sample until convergence
     nudge_count = 0
     total_timesteps = 0
+    grad_fn = jax.vmap(nnx.grad(loss_fn))
     while jnp.median(jnp.linalg.norm(v_fp[-1][:y.shape[0]] - y, axis=-1)) > cfg.nudge.convergence_tolerance:
         if nudge_count > cfg.nudge.max_count:
             break
@@ -47,7 +54,8 @@ def runs_with_nudges(cfg, rngs, x, y, model, v_fp, vjps, epoch, sample_idx,
         pre_nudge_params = get_model_params(model)
         nudge_count += 1
         # Compute nudge in direction of target/label
-        rclamp = v_fp[-1][:y.shape[0]] + (y - v_fp[-1][:y.shape[0]]) * cfg.nudge.scaling_factor
+        nudge = -grad_fn(v_fp[-1][:y.shape[0]], y)
+        rclamp = v_fp[-1][:y.shape[0]] + nudge * cfg.nudge.scaling_factor
         # Run dynamics until convergence
         _, activations, timesteps = run(model, approx_pc_step, x,
                                         disable_tqdm=True,
@@ -112,7 +120,7 @@ def initialize_to_fp(cfg, model, sample):
 
     return init_v_fp, init_vjps
 
-def test_sample(cfg, rngs, model, x, y):
+def test_sample(cfg, rngs, model, x, y, loss_fn = mse):
     init_activations = model.get_activations()
     fp_input = jrng.normal(rngs.train(), x.shape) * 1e-1
     init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
@@ -127,14 +135,16 @@ def test_sample(cfg, rngs, model, x, y):
                             tolerance_style=cfg.dynamics.tolerance_style,
                             learn=False)
     error_val = float(jnp.mean(jnp.linalg.norm(activations[-1][:y.shape[0]] - y, axis=-1)))
+    loss_val = float(jnp.mean(loss_fn(activations[-1][:y.shape[0]], y)))
     model.set_activations(init_activations)
 
-    return error_val, activations
+    return error_val, loss_val, activations
 
-def train_epoch(cfg, rngs, model, dataset_trn, epoch, integration_step):
+def train_epoch(cfg, rngs, model, dataset_trn, loss_fn, epoch, integration_step):
     epoch_nudge_counts = []
     epoch_timestep_counts = []
     epoch_errors = []
+    epoch_losses = []
     epoch_accuracies = []
 
     for sample_idx, (x, y) in tqdm(enumerate(dataset_trn), desc="training", position=1, leave=False):
@@ -152,15 +162,17 @@ def train_epoch(cfg, rngs, model, dataset_trn, epoch, integration_step):
             epoch,
             global_sample_idx,
             integration_step,
+            loss_fn=loss_fn
         )
 
         # Evaluate using test_sample for comparable metrics
-        error_val, test_activations = test_sample(cfg, rngs, model, x, y)
+        error_val, loss_val, test_activations = test_sample(cfg, rngs, model, x, y, loss_fn=loss_fn)
 
         # Log summary metrics for this sample
         epoch_nudge_counts.append(nudge_count)
         epoch_timestep_counts.append(total_timesteps)
         epoch_errors.append(error_val)
+        epoch_losses.append(loss_val)
         epoch_accuracies.append(float(accuracy(test_activations[-1][:y.shape[0]], y)))
 
         # Log sample-level metrics to wandb
@@ -171,17 +183,20 @@ def train_epoch(cfg, rngs, model, dataset_trn, epoch, integration_step):
             "train/total_timesteps_per_sample": total_timesteps,
             "train/integration_step": integration_step,
             "train/batch_final_error": epoch_errors[-1],
+            "train/batch_final_loss": epoch_losses[-1],
             "train/batch_final_accuracy": epoch_accuracies[-1]
         }, commit=(sample_idx < len(dataset_trn) - 1))
 
     wandb.log({"epoch": epoch,
                "train/avg_epoch_error": jnp.mean(jnp.array(epoch_errors)),
+               "train/avg_epoch_loss": jnp.mean(jnp.array(epoch_losses)),
                "train/avg_epoch_accuracy": jnp.mean(jnp.array(epoch_accuracies))})
 
     return integration_step
 
-def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch, log_group = "test"):
+def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch, loss_fn = mse, log_group = "test"):
     epoch_errors = []
+    epoch_losses = []
     epoch_accuracies = []
     for sample_idx, (x, y) in tqdm(enumerate(dataset_tst), desc="testing", position=1, leave=False):
         global_sample_idx = sample_idx + len(dataset_tst) * epoch
@@ -201,7 +216,9 @@ def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch, log_group = "test"):
                                         learn=False)
 
         error_val = float(jnp.mean(jnp.linalg.norm(activations[-1][:y.shape[0]] - y, axis=-1)))
+        loss_val = float(jnp.mean(loss_fn(activations[-1][:y.shape[0]], y)))
         epoch_errors.append(error_val)
+        epoch_losses.append(loss_val)
         epoch_accuracies.append(float(accuracy(activations[-1][:y.shape[0]], y)))
 
         # Log sample-level metrics to wandb
@@ -210,11 +227,13 @@ def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch, log_group = "test"):
             f"{log_group}/sample": global_sample_idx,
             f"{log_group}/total_timesteps_per_sample": timesteps,
             f"{log_group}/batch_final_error": error_val,
+            f"{log_group}/batch_final_loss": loss_val,
             f"{log_group}/batch_final_accuracy": epoch_accuracies[-1]
         }, commit=(sample_idx < len(dataset_tst) - 1))
 
     wandb.log({"epoch": epoch,
                f"{log_group}/avg_epoch_error": jnp.mean(jnp.array(epoch_errors)),
+               f"{log_group}/avg_epoch_loss": jnp.mean(jnp.array(epoch_losses)),
                f"{log_group}/avg_epoch_accuracy": jnp.mean(jnp.array(epoch_accuracies))})
 
 @hydra.main(config_path="./configs", config_name="main", version_base=None)
@@ -250,6 +269,13 @@ def main(cfg):
                     kernel_init_scale=cfg.model.get("kernel_init_scale", 1.0),
                     rngs=rngs)
 
+    # Get loss function
+    loss = cfg.get("loss")
+    if (loss is None) or loss == "mse":
+        loss_fn = mse
+    elif loss == "crossentropy":
+        loss_fn = softmax_cross_entropy
+
     # Load datasets
     transforms = default_data_transforms(cfg.data)
     data = load_dataset(cfg.data, rngs.data(), transforms)
@@ -279,8 +305,8 @@ def main(cfg):
     integration_step = 0
     fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
     init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
-    test_epoch(cfg, model, init_v_fp, init_vjps, trn_loader, 0, log_group="train")
-    test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, 0)
+    test_epoch(cfg, model, init_v_fp, init_vjps, trn_loader, 0, loss_fn=loss_fn, log_group="train")
+    test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, 0, loss_fn=loss_fn)
     if cfg.profile:
         with jax.profiler.trace("/tmp/jax-trace", create_perfetto_trace=False):
             for epoch in tqdm(range(1, cfg.training.epochs + 1), desc="epochs", position=0, leave=True):
@@ -289,12 +315,13 @@ def main(cfg):
                     rngs,
                     model,
                     trn_loader,
+                    loss_fn,
                     epoch,
                     integration_step,
                 )
                 fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
                 init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
-                test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, epoch)
+                test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, epoch, loss_fn=loss_fn)
                 save_checkpoint(checkpoint_manager, model, epoch)
     else:
         for epoch in tqdm(range(1, cfg.training.epochs + 1), desc="epochs", position=0, leave=True):
@@ -303,12 +330,13 @@ def main(cfg):
                 rngs,
                 model,
                 trn_loader,
+                loss_fn,
                 epoch,
                 integration_step,
             )
             fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
             init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
-            test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, epoch)
+            test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, epoch, loss_fn=loss_fn)
             save_checkpoint(checkpoint_manager, model, epoch)
 
 

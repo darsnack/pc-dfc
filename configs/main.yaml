@@ -21,6 +21,7 @@ model:
   kernel_init_scale: 1.0
 nmodels: 1
 seed: 0
+loss: mse
 training:
   epochs: 50
   learning_rate: 1e-3

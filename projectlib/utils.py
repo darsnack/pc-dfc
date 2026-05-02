@@ -12,6 +12,10 @@ def accuracy(ypred, ytrue):
     return jnp.mean(jnp.argmax(ypred, axis=-1) == jnp.argmax(ytrue, axis=-1))
 
 @nnx.jit
+def mse(ypred, ytrue):
+    return jnp.mean((ypred - ytrue) ** 2, axis=-1)
+
+@nnx.jit
 def get_model_params(model):
     """Extract all model parameters as a flat dictionary."""
     # Extract weights and biases from each layer

@@ -20,6 +20,7 @@ sbatch\
     --export=ALL\
     --array=0-$((${NJOBS}-1))\
     --job-name=pc-dfc-sweep-${SLURM_SWEEP_ID}\
-    --qos=slow_nice\
+    --qos=bio_ai\
+    --time=48:00:00\
     --exclude=bamgpu100,bamgpu101\
     launch-slurm.job "${@:2}"
