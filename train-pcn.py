@@ -361,10 +361,10 @@ def main(cfg):
 
     if cfg.nmodels > 1:
         with nnx.split_rngs(rngs, splits=cfg.nmodels, only="params"):
-            nmodels_axes = nnx.StateAxes({...: 0})
             model = nnx.vmap(
                 lambda r: _create_single_model(r, cfg, activation_fn),
-                in_axes=(nmodels_axes,), out_axes=nmodels_axes,
+                in_axes=(nnx.StateAxes({...: None}),),
+                out_axes=nnx.StateAxes({...: 0}),
             )(rngs)
     else:
         model = _create_single_model(rngs, cfg, activation_fn)
