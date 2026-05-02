@@ -1,0 +1,4 @@
+name: emnist
+split: balanced
+flatten: true
+normalize: true

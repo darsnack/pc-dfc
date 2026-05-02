@@ -1,0 +1,13 @@
+# @package _global_
+
+dynamics:
+  convergence_tolerance: 1e-2
+nudge:
+  max_count: 500
+  convergence_tolerance: 1e-2
+model:
+  layer_dims: [784, 256, 128, 64, 47] # including input/output dims.
+  activation_fn: tanh # noop or tanh
+training:
+  batch_size: 1024
+  learning_rate: 0.001

@@ -40,6 +40,11 @@ class OneHot(torch.nn.Module):
         else:
             return F.one_hot(label, self.num_classes)
 
+class EMNISTFlip(torch.nn.Module):
+    def forward(self, img):
+        # Fix EMNIST orientation: swap height and width axes
+        return img.permute(0, 2, 1)
+
 class JaxImageOrder(torch.nn.Module):
     def forward(self, img):
         # CHW --> HWC
@@ -48,14 +53,24 @@ class JaxImageOrder(torch.nn.Module):
 def default_data_transforms(cfg):
     if cfg.name == "mnist":
         img_transforms = [transforms.ToImage(),
-                          transforms.ToDtype(torch.float32, scale=True),
-                          JaxImageOrder()]
+                          transforms.ToDtype(torch.float32, scale=True)]
         if cfg.normalize:
             img_transforms.append(transforms.Normalize((0.1307,), (0.3081,)))
+        img_transforms.append(JaxImageOrder())
         if cfg.flatten:
             img_transforms.append(Flatten())
 
         return transforms.Compose(img_transforms), OneHot(10, soft_onehot=True)
+    elif cfg.name == "emnist":
+        img_transforms = [transforms.ToImage(),
+                          transforms.ToDtype(torch.float32, scale=True),
+                          EMNISTFlip()] # fix orientation
+        if cfg.normalize:
+            img_transforms.append(transforms.Normalize((0.1736,), (0.3248,)))
+        img_transforms.append(JaxImageOrder())
+        if cfg.flatten:
+            img_transforms.append(Flatten())
+        return transforms.Compose(img_transforms), OneHot(47, soft_onehot=True)
     else:
         return None, None
 
@@ -71,6 +86,25 @@ def load_dataset(cfg, rng_key, transforms = (None, None)):
             ),
             "test": datasets.MNIST(
                 "~/torchvision",
+                train=False,
+                download=True,
+                transform=transforms[0],
+                target_transform=transforms[1],
+            ),
+        }
+    elif cfg.name == "emnist":
+        return {
+            "train": datasets.EMNIST(
+                "~/torchvision",
+                split=cfg.split,
+                train=True,
+                download=True,
+                transform=transforms[0],
+                target_transform=transforms[1],
+            ),
+            "test": datasets.EMNIST(
+                "~/torchvision",
+                split=cfg.split,
                 train=False,
                 download=True,
                 transform=transforms[0],
