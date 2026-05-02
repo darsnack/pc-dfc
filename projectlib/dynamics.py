@@ -128,6 +128,7 @@ def run(model, step_fn, x,
         tolerance_style = "norm",
         disable_tqdm = False,
         return_act_history = False,
+        nmodels = 1,
         **kwargs):
     """Run the model for a specified number of timesteps or until convergence."""
     errors = []
@@ -137,7 +138,7 @@ def run(model, step_fn, x,
     # Loop with tqdm progress bar based on t and max_timesteps
     with tqdm(total=max_timesteps, desc="timesteps", disable=disable_tqdm) as bar:
         while (t < min_timesteps) or ((t < max_timesteps)
-                                      and not is_converged(activations, tolerance, tolerance_style)):
+                                      and not is_converged(activations, tolerance, tolerance_style, nmodels)):
             # Run single step of model dynamics
             error = step_fn(model, x, **kwargs)
             # Store activations at this timestep
@@ -156,12 +157,12 @@ def run(model, step_fn, x,
     return errors, activations, t
 
 
-def is_converged(activations, tolerance, tolerance_style):
+def is_converged(activations, tolerance, tolerance_style, nmodels=1):
     """Check if the model has converged based on the change in activations."""
     if len(activations[0]) < 2:
         return False
     else:
-        # dvs is [L, B]
+        # dvs is [L, ...] where trailing dims are (nmodels, B) or (B,)
         dvs = jnp.array([jnp.sum((act[-1] - act[-2]) ** 2, axis=-1) for act in activations])
         dv_total = jnp.sum(dvs, axis=0)
         if tolerance_style == "norm":
@@ -170,4 +171,7 @@ def is_converged(activations, tolerance, tolerance_style):
             n_neurons = sum([act.shape[-1] for act in activations])
             dist = dv_total / n_neurons
 
-        return jnp.min(dist) < tolerance
+        if nmodels > 1:
+            return jnp.max(jnp.min(dist, axis=-1)) < tolerance
+        else:
+            return jnp.min(dist) < tolerance
