@@ -1,0 +1,12 @@
+pc_sweep_id: ???
+approx_pc_sweep_id: ???
+pc_nudges_sweep_id: ???
+entity: mitra-ryan-kyle
+project: pc-dfc
+cache_dir: ./.wandb_cache
+no_cache: false
+dpi: 200
+
+hydra:
+  job:
+    chdir: true
