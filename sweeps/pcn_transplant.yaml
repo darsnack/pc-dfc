@@ -1,0 +1,21 @@
+program: pcn-transplant.py
+name: pcn_transplant_sweep
+method: grid
+parameters:
+  source-lr:
+    value: 0.001
+  source-seed:
+    values:
+      - 0
+      - 1
+      - 2
+      - 3
+      - 4
+command:
+- ${env}
+- PYTHONFAULTHANDLER=1
+- XLA_PYTHON_CLIENT_PREALLOCATE=1
+- uv
+- run
+- ${program}
+- ${args}
