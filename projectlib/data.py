@@ -61,6 +61,16 @@ def default_data_transforms(cfg):
             img_transforms.append(Flatten())
 
         return transforms.Compose(img_transforms), OneHot(10, soft_onehot=True)
+    elif cfg.name == "fashionmnist":
+        img_transforms = [transforms.ToImage(),
+                          transforms.ToDtype(torch.float32, scale=True)]
+        if cfg.normalize:
+            img_transforms.append(transforms.Normalize((0.2860,), (0.3530,)))
+        img_transforms.append(JaxImageOrder())
+        if cfg.flatten:
+            img_transforms.append(Flatten())
+
+        return transforms.Compose(img_transforms), OneHot(10, soft_onehot=True)
     elif cfg.name == "emnist":
         img_transforms = [transforms.ToImage(),
                           transforms.ToDtype(torch.float32, scale=True),
@@ -105,6 +115,23 @@ def load_dataset(cfg, rng_key, transforms = (None, None)):
             "test": datasets.EMNIST(
                 "~/torchvision",
                 split=cfg.split,
+                train=False,
+                download=True,
+                transform=transforms[0],
+                target_transform=transforms[1],
+            ),
+        }
+    elif cfg.name == "fashionmnist":
+        return {
+            "train": datasets.FashionMNIST(
+                "~/torchvision",
+                train=True,
+                download=True,
+                transform=transforms[0],
+                target_transform=transforms[1],
+            ),
+            "test": datasets.FashionMNIST(
+                "~/torchvision",
                 train=False,
                 download=True,
                 transform=transforms[0],

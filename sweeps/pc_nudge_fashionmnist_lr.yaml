@@ -1,0 +1,41 @@
+program: train-pcn.py
+name: pc_nudge_fashionmnist_lr
+method: grid
+parameters:
+  data:
+    value: fashionmnist
+  model.activation_fn:
+    value: tanh
+  nudge.enabled:
+    value: true
+  # use this format for nesting
+  # cause otherwise hydra is confused
+  # (see https://github.com/wandb/wandb/issues/4686#issuecomment-2407556397)
+  training.learning_rate:
+    values:
+      - 0.01
+      - 0.005
+      - 0.001
+      - 0.0005
+      - 0.0001
+      - 0.00005
+      - 0.00001
+  training.epochs:
+    value: 200
+  seed:
+    values:
+      - 0
+      - 1
+      - 2
+      - 3
+      - 4
+command:
+- ${env}
+- PYTHONFAULTHANDLER=1
+- XLA_PYTHON_CLIENT_PREALLOCATE=1
+- uv
+- run
+- ${program}
+# this is hydra interpolation not wandb
+- hydra.run.dir=./outputs/pc_nudge_fashionmnist_lr/lr_${training.learning_rate}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+- ${args_no_hyphens}
