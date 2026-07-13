@@ -19,12 +19,14 @@ model:
   layer_dims: [2, 2, 2, 1] # including input/output dims.
   activation_fn: noop # noop or tanh
   kernel_init_scale: 1.0
+  use_bias: true
 nmodels: 1
 seed: 0
 loss: mse
 training:
   epochs: 50
   learning_rate: 1e-3
+  adam: false
   batch_size: 1
 profile: false
 checkpointing:

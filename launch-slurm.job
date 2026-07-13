@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=pc-dfc                ### Name of the job
 #SBATCH --ntasks=1                       ### Number of Tasks
-#SBATCH --cpus-per-task=56               ### Number of CPUs per Task
-#SBATCH --mem=160G                       ### Memory required
+#SBATCH --cpus-per-task=32               ### Number of CPUs per Task
+#SBATCH --mem=64GB                       ### Memory required
 #SBATCH --partition=gpuq
 #SBATCH --qos=default
 #SBATCH --time=12:00:00

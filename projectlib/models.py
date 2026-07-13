@@ -4,7 +4,7 @@ from flax import nnx
 from flax.nnx.nn.initializers import variance_scaling, DtypeLikeInexact
 from typing import Sequence, Callable
 
-class Activation(nnx.Param):
+class Activation(nnx.Variable):
     pass
 
 def lecun_norm_w_scale(scale: float = 1.0,
@@ -17,12 +17,15 @@ def lecun_norm_w_scale(scale: float = 1.0,
 
 class MLP(nnx.Module):
     def __init__(self, features: Sequence[int], *, rngs,
-                 kernel_init_scale: float = 1.0, activation_fn: Callable = nnx.tanh):
+                 kernel_init_scale: float = 1.0,
+                 activation_fn: Callable = nnx.tanh,
+                 use_bias = True):
         self.layers = [nnx.Linear(fin, fout,
-                                  use_bias=False,
+                                  use_bias=use_bias,
                                   kernel_init=lecun_norm_w_scale(scale=kernel_init_scale),
                                   rngs=rngs)
                        for fin, fout in zip(features[:-1], features[1:])]
+        self.use_bias = use_bias
         # initialize the neuron activations (pre-nonlinearity)
         self.activations = [Activation(jrng.normal(rngs.activations(), (fout,)))
                             for fout in features[1:]]

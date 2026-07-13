@@ -57,17 +57,17 @@ def runs_with_nudges(cfg, rngs, x, y, model, v_fp, vjps, epoch, sample_idx,
         nudge = -grad_fn(v_fp[-1][:y.shape[0]], y)
         rclamp = v_fp[-1][:y.shape[0]] + nudge * cfg.nudge.scaling_factor
         # Run dynamics until convergence
-        _, activations, timesteps = run(model, approx_pc_step, x,
-                                        disable_tqdm=True,
-                                        vjps=vjps,
-                                        tau=cfg.dynamics.time_constant,
-                                        eta=cfg.training.learning_rate,
-                                        min_timesteps=cfg.dynamics.min_timesteps,
-                                        max_timesteps=cfg.dynamics.max_timesteps,
-                                        tolerance=cfg.dynamics.convergence_tolerance,
-                                        tolerance_style=cfg.dynamics.tolerance_style,
-                                        learn=True,
-                                        rclamp=rclamp)
+        _, _, activations, timesteps = run(model, approx_pc_step, x,
+                                           disable_tqdm=True,
+                                           vjps=vjps,
+                                           tau=cfg.dynamics.time_constant,
+                                           eta=cfg.training.learning_rate,
+                                           min_timesteps=cfg.dynamics.min_timesteps,
+                                           max_timesteps=cfg.dynamics.max_timesteps,
+                                           tolerance=cfg.dynamics.convergence_tolerance,
+                                           tolerance_style=cfg.dynamics.tolerance_style,
+                                           learn=True,
+                                           rclamp=rclamp)
         # Update fixed point
         v_fp = activations
         vjps = current_pc_vjp(model, x)
@@ -106,11 +106,11 @@ def runs_with_nudges(cfg, rngs, x, y, model, v_fp, vjps, epoch, sample_idx,
     return nudge_count, total_timesteps, v_fp, vjps, integration_step
 
 def initialize_to_fp(cfg, model, sample):
-    _, activations, init_steps = run(model, pc_step, sample,
-                                     disable_tqdm=True,
-                                     tau=cfg.dynamics.time_constant,
-                                     tolerance_style=cfg.dynamics.tolerance_style,
-                                     learn=False)
+    _, _, activations, init_steps = run(model, pc_step, sample,
+                                        disable_tqdm=True,
+                                        tau=cfg.dynamics.time_constant,
+                                        tolerance_style=cfg.dynamics.tolerance_style,
+                                        learn=False)
     tqdm.write(f"Initial convergence took {init_steps} timesteps")
     # Log initial convergence to wandb
     wandb.log({"initial_convergence_timesteps": init_steps})
@@ -123,22 +123,22 @@ def initialize_to_fp(cfg, model, sample):
 def test_sample(cfg, rngs, model, x, y, loss_fn = mse):
     init_activations = model.get_activations()
     fp_input = jrng.normal(rngs.train(), x.shape) * 1e-1
-    init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
-    _, activations, _ = run(model, approx_pc_step, x,
-                            disable_tqdm=True,
-                            vjps=init_vjps,
-                            tau=cfg.dynamics.time_constant,
-                            eta=cfg.training.learning_rate,
-                            min_timesteps=cfg.dynamics.min_timesteps,
-                            max_timesteps=cfg.dynamics.max_timesteps,
-                            tolerance=cfg.dynamics.convergence_tolerance,
-                            tolerance_style=cfg.dynamics.tolerance_style,
-                            learn=False)
-    error_val = float(jnp.mean(jnp.linalg.norm(activations[-1][:y.shape[0]] - y, axis=-1)))
-    loss_val = float(jnp.mean(loss_fn(activations[-1][:y.shape[0]], y)))
+    _, init_vjps = initialize_to_fp(cfg, model, fp_input)
+    pred, _, _, _ = run(model, approx_pc_step, x,
+                        disable_tqdm=True,
+                        vjps=init_vjps,
+                        tau=cfg.dynamics.time_constant,
+                        eta=cfg.training.learning_rate,
+                        min_timesteps=cfg.dynamics.min_timesteps,
+                        max_timesteps=cfg.dynamics.max_timesteps,
+                        tolerance=cfg.dynamics.convergence_tolerance,
+                        tolerance_style=cfg.dynamics.tolerance_style,
+                        learn=False)
+    error_val = float(jnp.mean(jnp.linalg.norm(pred[:y.shape[0]] - y, axis=-1)))
+    loss_val = float(jnp.mean(loss_fn(pred[:y.shape[0]], y)))
     model.set_activations(init_activations)
 
-    return error_val, loss_val, activations
+    return pred, error_val, loss_val
 
 def train_epoch(cfg, rngs, model, dataset_trn, loss_fn, epoch, integration_step):
     epoch_nudge_counts = []
@@ -166,14 +166,14 @@ def train_epoch(cfg, rngs, model, dataset_trn, loss_fn, epoch, integration_step)
         )
 
         # Evaluate using test_sample for comparable metrics
-        error_val, loss_val, test_activations = test_sample(cfg, rngs, model, x, y, loss_fn=loss_fn)
+        pred, error_val, loss_val = test_sample(cfg, rngs, model, x, y, loss_fn=loss_fn)
 
         # Log summary metrics for this sample
         epoch_nudge_counts.append(nudge_count)
         epoch_timestep_counts.append(total_timesteps)
         epoch_errors.append(error_val)
         epoch_losses.append(loss_val)
-        epoch_accuracies.append(float(accuracy(test_activations[-1][:y.shape[0]], y)))
+        epoch_accuracies.append(float(accuracy(pred[:y.shape[0]], y)))
 
         # Log sample-level metrics to wandb
         wandb.log({
@@ -205,21 +205,21 @@ def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch, loss_fn = mse, log_gr
         model.set_activations(v_fp)
 
         # Run dynamics until convergence
-        _, activations, timesteps = run(model, approx_pc_step, x,
-                                        disable_tqdm=True,
-                                        vjps=vjps,
-                                        tau=cfg.dynamics.time_constant,
-                                        min_timesteps=cfg.dynamics.min_timesteps,
-                                        max_timesteps=cfg.dynamics.max_timesteps,
-                                        tolerance=cfg.dynamics.convergence_tolerance,
-                                        tolerance_style=cfg.dynamics.tolerance_style,
-                                        learn=False)
+        pred, _, _, timesteps = run(model, approx_pc_step, x,
+                                    disable_tqdm=True,
+                                    vjps=vjps,
+                                    tau=cfg.dynamics.time_constant,
+                                    min_timesteps=cfg.dynamics.min_timesteps,
+                                    max_timesteps=cfg.dynamics.max_timesteps,
+                                    tolerance=cfg.dynamics.convergence_tolerance,
+                                    tolerance_style=cfg.dynamics.tolerance_style,
+                                    learn=False)
 
-        error_val = float(jnp.mean(jnp.linalg.norm(activations[-1][:y.shape[0]] - y, axis=-1)))
-        loss_val = float(jnp.mean(loss_fn(activations[-1][:y.shape[0]], y)))
+        error_val = float(jnp.mean(jnp.linalg.norm(pred[:y.shape[0]] - y, axis=-1)))
+        loss_val = float(jnp.mean(loss_fn(pred[:y.shape[0]], y)))
         epoch_errors.append(error_val)
         epoch_losses.append(loss_val)
-        epoch_accuracies.append(float(accuracy(activations[-1][:y.shape[0]], y)))
+        epoch_accuracies.append(float(accuracy(pred[:y.shape[0]], y)))
 
         # Log sample-level metrics to wandb
         wandb.log({
@@ -261,12 +261,14 @@ def main(cfg):
                 MLP(cfg.model.layer_dims,
                     activation_fn=activation_fn,
                     kernel_init_scale=cfg.model.get("kernel_init_scale", 1.0),
+                    use_bias=cfg.model.get("use_bias", True),
                     rngs=r),
             in_axes=(state_axes,), out_axes=state_axes)(rngs)
     else:
         model = MLP(cfg.model.layer_dims,
                     activation_fn=activation_fn,
                     kernel_init_scale=cfg.model.get("kernel_init_scale", 1.0),
+                    use_bias=cfg.model.get("use_bias", True),
                     rngs=rngs)
 
     # Get loss function

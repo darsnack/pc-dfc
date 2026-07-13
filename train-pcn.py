@@ -3,43 +3,44 @@ import hydra
 from hydra.core.hydra_config import HydraConfig
 import wandb
 import jax
+import optax
 import jax.numpy as jnp
 import jax.random as jrng
 import orbax.checkpoint as ocp
 from flax import nnx
+from optax.losses import softmax_cross_entropy
 from omegaconf import OmegaConf
 from tqdm.auto import tqdm
 
 from projectlib.models import MLP, Activation
 from projectlib.dynamics import pc_step, run
 from projectlib.data import load_dataset, build_dataloader, default_data_transforms
-from projectlib.utils import noop, get_model_params, compute_param_change_norm
+from projectlib.utils import noop, get_model_params, compute_param_change_norm, mse
 
-def make_step_fn(nmodels):
+def make_step_fn(nmodels, loss_fn, opt):
     if nmodels <= 1:
-        return pc_step
-
-    model_axes = nnx.StateAxes({...: 0})
-
-    def step(model, x, **kwargs):
-        rclamp = kwargs.get('rclamp', None)
-        tau = kwargs.get('tau', 1)
-        eta = kwargs.get('eta', 1)
-        learn = kwargs.get('learn', False)
-        if rclamp is not None:
-            vmapped = nnx.vmap(
-                lambda m, x, rc, tau, eta: pc_step(m, x, tau=tau, eta=eta, rclamp=rc, learn=learn),
-                in_axes=(model_axes, None, 0, None, None),
-                out_axes=0,
-            )
-            return vmapped(model, x, rclamp, tau, eta)
-        else:
-            vmapped = nnx.vmap(
-                lambda m, x, rc, tau, eta: pc_step(m, x, tau=tau, eta=eta, rclamp=None, learn=learn),
-                in_axes=(model_axes, None, None, None, None),
-                out_axes=0,
-            )
-            return vmapped(model, x, rclamp, tau, eta)
+        def step(model, x, **kwargs):
+            return pc_step(model, opt, x, **kwargs)
+    else:
+        model_axes = nnx.StateAxes({...: 0})
+        def step(model, x, **kwargs):
+            rclamp = kwargs.get('rclamp', None)
+            tau = kwargs.get('tau', 1)
+            learn = kwargs.get('learn', False)
+            if rclamp is not None:
+                vmapped = nnx.vmap(
+                    lambda m, o, x, rc, tau: pc_step(m, o, x, tau=tau, rclamp=rc, learn=learn, loss_fn=loss_fn),
+                    in_axes=(model_axes, 0, None, 0, None),
+                    out_axes=0,
+                )
+                return vmapped(model, opt, x, rclamp, tau)
+            else:
+                vmapped = nnx.vmap(
+                    lambda m, o, x, rc, tau: pc_step(m, o, x, tau=tau, rclamp=None, learn=learn, loss_fn=loss_fn),
+                    in_axes=(model_axes, 0, None, None, None),
+                    out_axes=0,
+                )
+                return vmapped(model, opt, x, rclamp, tau)
 
     return step
 
@@ -51,12 +52,14 @@ def _create_single_model(rngs, cfg, activation_fn):
                 MLP(cfg.model.layer_dims,
                     activation_fn=activation_fn,
                     kernel_init_scale=cfg.model.get("kernel_init_scale", 1.0),
+                    use_bias=cfg.model.get("use_bias", True),
                     rngs=r),
             in_axes=(state_axes,), out_axes=state_axes)(rngs)
     else:
         model = MLP(cfg.model.layer_dims,
                     activation_fn=activation_fn,
                     kernel_init_scale=cfg.model.get("kernel_init_scale", 1.0),
+                    use_bias=cfg.model.get("use_bias", True),
                     rngs=rngs)
     return model
 
@@ -91,46 +94,46 @@ def run_sample(cfg, rngs, x, y, model, step_fn, epoch, sample_idx, integration_s
         rclamp = jnp.broadcast_to(y, (nmodels, *y.shape))
 
     if cfg.dynamics.sync_updates:
-        _, _, timesteps = run(model, step_fn, x,
-                              nmodels=nmodels,
-                              disable_tqdm=True,
-                              tau=cfg.dynamics.time_constant,
-                              eta=cfg.training.learning_rate,
-                              min_timesteps=cfg.dynamics.min_timesteps,
-                              max_timesteps=cfg.dynamics.max_timesteps,
-                              tolerance=cfg.dynamics.convergence_tolerance,
-                              tolerance_style=cfg.dynamics.tolerance_style,
-                              learn=True,
-                              rclamp=rclamp)
+        _, _, _, timesteps = run(model, step_fn, x,
+                                 nmodels=nmodels,
+                                 disable_tqdm=True,
+                                 tau=cfg.dynamics.time_constant,
+                                 # eta=cfg.training.learning_rate,
+                                 min_timesteps=cfg.dynamics.min_timesteps,
+                                 max_timesteps=cfg.dynamics.max_timesteps,
+                                 tolerance=cfg.dynamics.convergence_tolerance,
+                                 tolerance_style=cfg.dynamics.tolerance_style,
+                                 learn=True,
+                                 rclamp=rclamp)
         total_timesteps = timesteps
     else:
         _, _, timesteps_inference = run(model, step_fn, x,
                                         nmodels=nmodels,
                                         disable_tqdm=True,
                                         tau=cfg.dynamics.time_constant,
-                                        eta=cfg.training.learning_rate,
+                                        # eta=cfg.training.learning_rate,
                                         min_timesteps=20,
                                         max_timesteps=20,
                                         tolerance=cfg.dynamics.convergence_tolerance,
                                         tolerance_style=cfg.dynamics.tolerance_style,
                                         learn=False,
                                         rclamp=rclamp)
-        _, _, timesteps_learning = run(model, step_fn, x,
-                                       nmodels=nmodels,
-                                       disable_tqdm=True,
-                                       tau=100000,
-                                       eta=cfg.training.learning_rate,
-                                       min_timesteps=1,
-                                       max_timesteps=1,
-                                       tolerance=cfg.dynamics.convergence_tolerance,
-                                       tolerance_style=cfg.dynamics.tolerance_style,
-                                       learn=True,
-                                       rclamp=rclamp)
+        _, _, _, timesteps_learning = run(model, step_fn, x,
+                                          nmodels=nmodels,
+                                          disable_tqdm=True,
+                                          tau=100000,
+                                          # eta=cfg.training.learning_rate,
+                                          min_timesteps=1,
+                                          max_timesteps=1,
+                                          tolerance=cfg.dynamics.convergence_tolerance,
+                                          tolerance_style=cfg.dynamics.tolerance_style,
+                                          learn=True,
+                                          rclamp=rclamp)
         total_timesteps = timesteps_inference + timesteps_learning
 
     integration_step += total_timesteps
 
-    error_val, activations = test_sample(cfg, rngs, model, step_fn, x, y)
+    error_val, pred = test_sample(cfg, rngs, model, step_fn, x, y)
     post_nudge_params = get_model_params(model)
     param_change_norm = compute_param_change_norm(pre_nudge_params, post_nudge_params)
 
@@ -143,7 +146,7 @@ def run_sample(cfg, rngs, x, y, model, step_fn, epoch, sample_idx, integration_s
         "train/weight_change_norm": param_change_norm
     }, commit=True)
 
-    return activations, total_timesteps, integration_step
+    return pred, total_timesteps, integration_step
 
 def runs_with_nudges(cfg, rngs, x, y, model, step_fn, v_fp, epoch, sample_idx,
                      integration_step):
@@ -166,41 +169,41 @@ def runs_with_nudges(cfg, rngs, x, y, model, step_fn, v_fp, epoch, sample_idx,
         rclamp = v_fp[-1] + (y - v_fp[-1]) * cfg.nudge.scaling_factor
 
         if cfg.dynamics.sync_updates:
-            _, activations, timesteps = run(model, step_fn, x,
-                                            nmodels=nmodels,
-                                            disable_tqdm=True,
-                                            tau=cfg.dynamics.time_constant,
-                                            eta=cfg.training.learning_rate,
-                                            min_timesteps=cfg.dynamics.min_timesteps,
-                                            max_timesteps=cfg.dynamics.max_timesteps,
-                                            tolerance=cfg.dynamics.convergence_tolerance,
-                                            tolerance_style=cfg.dynamics.tolerance_style,
-                                            learn=True,
-                                            rclamp=rclamp)
+            _, _, activations, timesteps = run(model, step_fn, x,
+                                               nmodels=nmodels,
+                                               disable_tqdm=True,
+                                               tau=cfg.dynamics.time_constant,
+                                               # eta=cfg.training.learning_rate,
+                                               min_timesteps=cfg.dynamics.min_timesteps,
+                                               max_timesteps=cfg.dynamics.max_timesteps,
+                                               tolerance=cfg.dynamics.convergence_tolerance,
+                                               tolerance_style=cfg.dynamics.tolerance_style,
+                                               learn=True,
+                                               rclamp=rclamp)
             nudge_timesteps = timesteps
         else:
-            _, _, timesteps_inference = run(model, step_fn, x,
-                                            nmodels=nmodels,
-                                            disable_tqdm=True,
-                                            tau=cfg.dynamics.time_constant,
-                                            eta=cfg.training.learning_rate,
-                                            min_timesteps=20,
-                                            max_timesteps=20,
-                                            tolerance=cfg.dynamics.convergence_tolerance,
-                                            tolerance_style=cfg.dynamics.tolerance_style,
-                                            learn=False,
-                                            rclamp=rclamp)
-            _, activations, timesteps_learning = run(model, step_fn, x,
-                                                    nmodels=nmodels,
-                                                    disable_tqdm=True,
-                                                    tau=100000,
-                                                    eta=cfg.training.learning_rate,
-                                                    min_timesteps=1,
-                                                    max_timesteps=1,
-                                                    tolerance=cfg.dynamics.convergence_tolerance,
-                                                    tolerance_style=cfg.dynamics.tolerance_style,
-                                                    learn=True,
-                                                    rclamp=rclamp)
+            _, _, _, timesteps_inference = run(model, step_fn, x,
+                                               nmodels=nmodels,
+                                               disable_tqdm=True,
+                                               tau=cfg.dynamics.time_constant,
+                                               # eta=cfg.training.learning_rate,
+                                               min_timesteps=20,
+                                               max_timesteps=20,
+                                               tolerance=cfg.dynamics.convergence_tolerance,
+                                               tolerance_style=cfg.dynamics.tolerance_style,
+                                               learn=False,
+                                               rclamp=rclamp)
+            _, _, activations, timesteps_learning = run(model, step_fn, x,
+                                                        nmodels=nmodels,
+                                                        disable_tqdm=True,
+                                                        tau=100000,
+                                                        # eta=cfg.training.learning_rate,
+                                                        min_timesteps=1,
+                                                        max_timesteps=1,
+                                                        tolerance=cfg.dynamics.convergence_tolerance,
+                                                        tolerance_style=cfg.dynamics.tolerance_style,
+                                                        learn=True,
+                                                        rclamp=rclamp)
             nudge_timesteps = timesteps_inference + timesteps_learning
 
         v_fp = activations
@@ -235,12 +238,12 @@ def runs_with_nudges(cfg, rngs, x, y, model, step_fn, v_fp, epoch, sample_idx,
     return nudge_count, total_timesteps, v_fp, integration_step
 
 def initialize_to_fp(cfg, model, step_fn, sample):
-    _, activations, init_steps = run(model, step_fn, sample,
-                                     nmodels=cfg.nmodels,
-                                     disable_tqdm=True,
-                                     tau=cfg.dynamics.time_constant,
-                                     tolerance_style=cfg.dynamics.tolerance_style,
-                                     learn=False)
+    _, _, activations, init_steps = run(model, step_fn, sample,
+                                        nmodels=cfg.nmodels,
+                                        disable_tqdm=True,
+                                        tau=cfg.dynamics.time_constant,
+                                        tolerance_style=cfg.dynamics.tolerance_style,
+                                        learn=False)
     tqdm.write(f"Initial convergence took {init_steps} timesteps")
     wandb.log({"initial_convergence_timesteps": init_steps})
     return activations
@@ -249,20 +252,20 @@ def test_sample(cfg, rngs, model, step_fn, x, y):
     init_activations = model.get_activations()
     fp_input = jrng.normal(rngs.train(), x.shape) * 1e-1
     _ = initialize_to_fp(cfg, model, step_fn, fp_input)
-    _, activations, _ = run(model, step_fn, x,
-                            nmodels=cfg.nmodels,
-                            disable_tqdm=True,
-                            tau=cfg.dynamics.time_constant,
-                            eta=cfg.training.learning_rate,
-                            min_timesteps=cfg.dynamics.min_timesteps,
-                            max_timesteps=cfg.dynamics.max_timesteps,
-                            tolerance=cfg.dynamics.convergence_tolerance,
-                            tolerance_style=cfg.dynamics.tolerance_style,
-                            learn=False)
-    error_val = jnp.mean(jnp.linalg.norm(activations[-1] - y, axis=-1), axis=-1)
+    pred, _, _, _ = run(model, step_fn, x,
+                        nmodels=cfg.nmodels,
+                        disable_tqdm=True,
+                        tau=cfg.dynamics.time_constant,
+                        # eta=cfg.training.learning_rate,
+                        min_timesteps=cfg.dynamics.min_timesteps,
+                        max_timesteps=cfg.dynamics.max_timesteps,
+                        tolerance=cfg.dynamics.convergence_tolerance,
+                        tolerance_style=cfg.dynamics.tolerance_style,
+                        learn=False)
+    error_val = jnp.mean(jnp.linalg.norm(pred - y, axis=-1), axis=-1)
     model.set_activations(init_activations)
 
-    return error_val, activations
+    return error_val, pred
 
 def _per_model_accuracy(pred, y):
     return jnp.mean(jnp.argmax(pred, axis=-1) == jnp.argmax(y, axis=-1), axis=-1)
@@ -281,16 +284,16 @@ def train_epoch(cfg, rngs, model, step_fn, dataset_trn, epoch, integration_step)
             nudge_count, total_timesteps, v_fp, integration_step = runs_with_nudges(
                 cfg, rngs, x, y, model, step_fn, v_fp, epoch, global_sample_idx, integration_step,
             )
-            error_val, test_activations = test_sample(cfg, rngs, model, step_fn, x, y)
+            error_val, pred = test_sample(cfg, rngs, model, step_fn, x, y)
             epoch_nudge_counts.append(nudge_count)
             epoch_errors.append(error_val)
-            epoch_accuracies.append(_per_model_accuracy(test_activations[-1], y))
+            epoch_accuracies.append(_per_model_accuracy(pred, y))
         else:
-            v_fp, total_timesteps, integration_step = run_sample(
+            pred, total_timesteps, integration_step = run_sample(
                 cfg, rngs, x, y, model, step_fn, epoch, global_sample_idx, integration_step,
             )
-            epoch_errors.append(jnp.mean(jnp.linalg.norm(v_fp[-1] - y, axis=-1), axis=-1))
-            epoch_accuracies.append(_per_model_accuracy(v_fp[-1], y))
+            epoch_errors.append(jnp.mean(jnp.linalg.norm(pred - y, axis=-1), axis=-1))
+            epoch_accuracies.append(_per_model_accuracy(pred, y))
 
         log_dict = {
             "epoch": epoch,
@@ -318,19 +321,19 @@ def test_epoch(cfg, model, step_fn, v_fp, dataset_tst, epoch, log_group = "test"
         x, y = jnp.array(x), jnp.array(y)
         model.set_activations(v_fp)
 
-        _, activations, timesteps = run(model, step_fn, x,
-                                        nmodels=cfg.nmodels,
-                                        disable_tqdm=True,
-                                        tau=cfg.dynamics.time_constant,
-                                        min_timesteps=cfg.dynamics.min_timesteps,
-                                        max_timesteps=cfg.dynamics.max_timesteps,
-                                        tolerance=cfg.dynamics.convergence_tolerance,
-                                        tolerance_style=cfg.dynamics.tolerance_style,
-                                        learn=False)
+        pred, _, _, timesteps = run(model, step_fn, x,
+                                    nmodels=cfg.nmodels,
+                                    disable_tqdm=True,
+                                    tau=cfg.dynamics.time_constant,
+                                    min_timesteps=cfg.dynamics.min_timesteps,
+                                    max_timesteps=cfg.dynamics.max_timesteps,
+                                    tolerance=cfg.dynamics.convergence_tolerance,
+                                    tolerance_style=cfg.dynamics.tolerance_style,
+                                    learn=False)
 
-        error_val = jnp.mean(jnp.linalg.norm(activations[-1] - y, axis=-1), axis=-1)
+        error_val = jnp.mean(jnp.linalg.norm(pred - y, axis=-1), axis=-1)
         epoch_errors.append(error_val)
-        epoch_accuracies.append(_per_model_accuracy(activations[-1], y))
+        epoch_accuracies.append(_per_model_accuracy(pred, y))
 
         wandb.log({
             "epoch": epoch,
@@ -359,6 +362,13 @@ def main(cfg):
     else:
         raise ValueError(f"Unknown activation fn: {cfg.model.activation_fn}")
 
+    # Get loss function
+    loss = cfg.get("loss")
+    if (loss is None) or loss == "mse":
+        loss_fn = mse
+    elif loss == "crossentropy":
+        loss_fn = softmax_cross_entropy
+
     if cfg.nmodels > 1:
         with nnx.split_rngs(rngs, splits=cfg.nmodels, only="params"):
             model = nnx.vmap(
@@ -369,7 +379,15 @@ def main(cfg):
     else:
         model = _create_single_model(rngs, cfg, activation_fn)
 
-    step_fn = make_step_fn(cfg.nmodels)
+    # Get the optimizer
+    if cfg.training.adam:
+        opt = nnx.Optimizer(model,
+                            optax.adamw(learning_rate=cfg.training.learning_rate, weight_decay=1e-5),
+                            wrt=nnx.Param)
+    else:
+        opt = nnx.Optimizer(model, optax.sgd(learning_rate=cfg.training.learning_rate), wrt=nnx.Param)
+
+    step_fn = make_step_fn(cfg.nmodels, loss_fn, opt)
 
     transforms = default_data_transforms(cfg.data)
     data = load_dataset(cfg.data, rngs.data(), transforms)

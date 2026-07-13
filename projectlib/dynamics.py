@@ -15,38 +15,53 @@ def pc_error(vs, vs_ff):
     return total_energy
 
 @nnx.jit(static_argnames=("learn",))
-def pc_step(model: nnx.Module, x, tau = 1, eta = 1, rclamp = None, learn = False):
-    def _compute_pc_error(model, x, rclamp):
-        _ = model(x, rclamp)
+def pc_step(model: nnx.Module, opt: nnx.Optimizer, x, tau = 1, rclamp = None, learn = False, loss_fn = None):
+    if loss_fn is None:
+        def _compute_pc_error(model, x, rclamp):
+            pred = model(x, rclamp)
 
-        return pc_error(model.activations, model.activations_ff)
+            return pc_error(model.activations, model.activations_ff), pred
+    else:
+        def _compute_pc_error(model, x, rclamp):
+            _ = model(x, rclamp)
+            free_energy = pc_error(model.activations[:-1], model.activations_ff[:-1])
+            # when rclamp != None, model.activations[-1] == rclamp
+            final_error = loss_fn(model.activations_ff[-1], model.activations[-1])
+
+            return free_energy + final_error
 
     acts_only = Activation
     if not learn:
         # compute local gradients w.r.t. current activations
         # nnx.DiffState(...) means w.r.t. 0-th argument and only the leaves of the tree
         # that match the acts_only filter
-        grad_fn = nnx.value_and_grad(_compute_pc_error, argnums=nnx.DiffState(0, acts_only))
+        grad_fn = nnx.value_and_grad(_compute_pc_error,
+                                     argnums=nnx.DiffState(0, acts_only),
+                                     has_aux=True)
     else:
         # compute local gradients w.r.t. to current activations + weights
-        grad_fn = nnx.value_and_grad(_compute_pc_error)
+        grad_fn = nnx.value_and_grad(_compute_pc_error,
+                                     argnums=nnx.DiffState(0, (acts_only, nnx.Param)),
+                                     has_aux=True)
 
     if x.ndim > 1:
         state_axes = nnx.StateAxes({Activation: 0, nnx.Intermediate: 0, ...: None})
         clamp_axes = None if rclamp is None else 0
         grad_fn = nnx.vmap(grad_fn, in_axes=(state_axes, 0, clamp_axes), out_axes=0)
 
-    total_energy, grads = grad_fn(model, x, rclamp)
+    (total_energy, pred), grads = grad_fn(model, x, rclamp)
     # update only current activations
     acts_state, other_state = nnx.state(model, acts_only, nnx.Param)
     acts_grads, other_grads = nnx.split_state(grads, acts_only, nnx.Param)
     new_acts = jtr.map(lambda v, dv: v - dv / tau, acts_state, acts_grads)
     if learn:
         # TODO: should we update avg. across batches??
-        other_state = jtr.map(lambda w, dw: w - eta * jnp.mean(dw, axis=0), other_state, other_grads)
-    nnx.update(model, new_acts, other_state)
+        other_grads = jtr.map(lambda dw: jnp.mean(dw, axis=0), other_grads)
+        opt.update(other_grads)
+        # other_state = jtr.map(lambda w, dw: w - eta * jnp.mean(dw, axis=0), other_state, other_grads)
+    nnx.update(model, new_acts)
 
-    return total_energy
+    return total_energy, pred
 
 @nnx.jit
 def current_pc_vjp(model: nnx.Module, x):
@@ -70,7 +85,7 @@ def current_pc_vjp(model: nnx.Module, x):
 @nnx.jit(static_argnames=("learn",))
 def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, eta = 1, rclamp = None, learn = False):
     # evaluate bottom up activations
-    _ = model(x, rclamp)
+    pred = model(x, rclamp)
     total_energy = pc_error(model.activations, model.activations_ff)
     # compute error signal
     # note that r_final = identity(model.activations_ff[-1])
@@ -83,6 +98,8 @@ def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, eta = 1, rclamp =
     else:
         dvs = [0]
     dws = []
+    if model.use_bias:
+        dbs = []
     # apply error propagation with VJPs starting from next to last layer
     # and working to the front of the network
     error = final_error
@@ -95,8 +112,15 @@ def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, eta = 1, rclamp =
         # compute gradient w.r.t. weights
         _v = v if v.ndim == 2 else v[None, :]
         _e = error if error.ndim == 2 else error[None, :]
+        # _v is [B, in_dim]
+        # _e is [B, out_dim]
+        # _v.T @ _e is [in_dim, out_dim] (summed over B)
         dw = eta / _e.shape[0] * model.activation_fn(_v).T @ _e
         dws.append(dw)
+        if model.use_bias:
+            # _e is [B, out_dim]
+            db = eta / _e.shape[0] * jnp.sum(_e, axis=0)
+            dbs.append(db)
         # propagate error backwards
         # (i.e. running prod_l J^l e^L)
         error = vjp(error)[0]
@@ -110,6 +134,9 @@ def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, eta = 1, rclamp =
     _e = error if error.ndim == 2 else error[None, :]
     dw = eta / _e.shape[0] * _x.T @ _e
     dws.append(dw)
+    if model.use_bias:
+        db = eta / _e.shape[0] * jnp.sum(_e, axis=0)
+        dbs.append(db)
 
     # apply dynamics
     for v, dv in zip(model.activations, reversed(dvs)):
@@ -117,8 +144,11 @@ def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, eta = 1, rclamp =
     if learn:
         for layer, dw in zip(model.layers, reversed(dws)):
             layer.kernel.value = layer.kernel.value + dw
+        if model.use_bias:
+            for layer, db in zip(model.layers, reversed(dbs)):
+                layer.bias.value = layer.bias.value + db
 
-    return jnp.mean(total_energy)
+    return jnp.mean(total_energy), pred
 
 
 def run(model, step_fn, x,
@@ -140,7 +170,7 @@ def run(model, step_fn, x,
         while (t < min_timesteps) or ((t < max_timesteps)
                                       and not is_converged(activations, tolerance, tolerance_style, nmodels)):
             # Run single step of model dynamics
-            error = step_fn(model, x, **kwargs)
+            error, pred = step_fn(model, x, **kwargs)
             # Store activations at this timestep
             for acts, a in zip(activations, model.activations):
                 acts.append(a.value.copy())
@@ -154,7 +184,7 @@ def run(model, step_fn, x,
     else:
         activations = [acts[-1] for acts in activations]
 
-    return errors, activations, t
+    return pred, errors, activations, t
 
 
 def is_converged(activations, tolerance, tolerance_style, nmodels=1):
