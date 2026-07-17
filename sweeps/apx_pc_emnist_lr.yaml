@@ -12,11 +12,15 @@ parameters:
   training.learning_rate:
     values:
       - 0.0001
-      - 0.00005
       - 0.00001
-      - 0.000005
+      - 0.000001
+      - 0.0000001
+      - 0.00000001
+      - 0.000000001
   training.epochs:
-    value: 200
+    value: 100
+  training.adam:
+    value: true
   seed:
     values:
       - 0

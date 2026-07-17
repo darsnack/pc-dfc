@@ -11,15 +11,16 @@ parameters:
   # (see https://github.com/wandb/wandb/issues/4686#issuecomment-2407556397)
   training.learning_rate:
     values:
-      - 0.01
-      - 0.005
-      - 0.001
-      - 0.0005
       - 0.0001
-      - 0.00005
       - 0.00001
+      - 0.000001
+      - 0.0000001
+      - 0.00000001
+      - 0.000000001
   training.epochs:
-    value: 200
+    value: 100
+  training.adam:
+    value: true
   seed:
     values:
       - 0

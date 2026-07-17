@@ -83,7 +83,8 @@ def current_pc_vjp(model: nnx.Module, x):
     return vjps
 
 @nnx.jit(static_argnames=("learn",))
-def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, eta = 1, rclamp = None, learn = False):
+def approx_pc_step(model: nnx.Module, opt: nnx.Optimizer, x, vjps,
+                   k = 1, tau = 1, rclamp = None, learn = False):
     # evaluate bottom up activations
     pred = model(x, rclamp)
     total_energy = pc_error(model.activations, model.activations_ff)
@@ -115,11 +116,13 @@ def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, eta = 1, rclamp =
         # _v is [B, in_dim]
         # _e is [B, out_dim]
         # _v.T @ _e is [in_dim, out_dim] (summed over B)
-        dw = eta / _e.shape[0] * model.activation_fn(_v).T @ _e
+        # NOTE: the optimizer applies updates as: parameter - lr * grad.
+        # Negate the original update to preserve the step direction.
+        dw = -model.activation_fn(_v).T @ _e / _e.shape[0]
         dws.append(dw)
         if model.use_bias:
             # _e is [B, out_dim]
-            db = eta / _e.shape[0] * jnp.sum(_e, axis=0)
+            db = -jnp.sum(_e, axis=0) / _e.shape[0]
             dbs.append(db)
         # propagate error backwards
         # (i.e. running prod_l J^l e^L)
@@ -132,21 +135,25 @@ def approx_pc_step(model: nnx.Module, x, vjps, k = 1, tau = 1, eta = 1, rclamp =
     # compute gradient update for first layer
     _x = x if x.ndim == 2 else x[None, :]
     _e = error if error.ndim == 2 else error[None, :]
-    dw = eta / _e.shape[0] * _x.T @ _e
+    dw = -_x.T @ _e / _e.shape[0]
     dws.append(dw)
     if model.use_bias:
-        db = eta / _e.shape[0] * jnp.sum(_e, axis=0)
+        db = -jnp.sum(_e, axis=0) / _e.shape[0]
         dbs.append(db)
 
     # apply dynamics
     for v, dv in zip(model.activations, reversed(dvs)):
         v.value = v.value + dv
     if learn:
-        for layer, dw in zip(model.layers, reversed(dws)):
-            layer.kernel.value = layer.kernel.value + dw
+        param_grads = {}
+        for layer_idx, dw in enumerate(reversed(dws)):
+            param_grads[('layers', layer_idx, 'kernel')] = dw
         if model.use_bias:
-            for layer, db in zip(model.layers, reversed(dbs)):
-                layer.bias.value = layer.bias.value + db
+            for layer_idx, db in enumerate(reversed(dbs)):
+                param_grads[('layers', layer_idx, 'bias')] = db
+        grads = nnx.map_state(lambda path, state: state.replace(param_grads[path]),
+                              nnx.state(model, nnx.Param))
+        opt.update(grads)
 
     return jnp.mean(total_energy), pred
 

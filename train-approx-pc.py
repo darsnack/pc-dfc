@@ -3,6 +3,7 @@ import hydra
 from hydra.core.hydra_config import HydraConfig
 import wandb
 import jax
+import optax
 import jax.numpy as jnp
 import jax.random as jrng
 import orbax.checkpoint as ocp
@@ -20,6 +21,12 @@ from projectlib.utils import (noop,
                               accuracy,
                               save_checkpoint,
                               mse)
+
+
+def _make_step_fn(step_fn, opt):
+    def step(model, x, **kwargs):
+        return step_fn(model, opt, x, **kwargs)
+    return step
 
 
 def load_checkpoint(checkpoint_path, model, sample_input=None):
@@ -41,7 +48,7 @@ def load_checkpoint(checkpoint_path, model, sample_input=None):
         return model, latest_step
     return model, None
 
-def runs_with_nudges(cfg, rngs, x, y, model, v_fp, vjps, epoch, sample_idx,
+def runs_with_nudges(cfg, rngs, x, y, model, opt, v_fp, vjps, epoch, sample_idx,
                      integration_step, loss_fn = mse):
     # Keep nudging toward current sample until convergence
     nudge_count = 0
@@ -57,11 +64,11 @@ def runs_with_nudges(cfg, rngs, x, y, model, v_fp, vjps, epoch, sample_idx,
         nudge = -grad_fn(v_fp[-1][:y.shape[0]], y)
         rclamp = v_fp[-1][:y.shape[0]] + nudge * cfg.nudge.scaling_factor
         # Run dynamics until convergence
-        _, _, activations, timesteps = run(model, approx_pc_step, x,
+        approx_step_fn = _make_step_fn(approx_pc_step, opt)
+        _, _, activations, timesteps = run(model, approx_step_fn, x,
                                            disable_tqdm=True,
                                            vjps=vjps,
                                            tau=cfg.dynamics.time_constant,
-                                           eta=cfg.training.learning_rate,
                                            min_timesteps=cfg.dynamics.min_timesteps,
                                            max_timesteps=cfg.dynamics.max_timesteps,
                                            tolerance=cfg.dynamics.convergence_tolerance,
@@ -105,8 +112,9 @@ def runs_with_nudges(cfg, rngs, x, y, model, v_fp, vjps, epoch, sample_idx,
 
     return nudge_count, total_timesteps, v_fp, vjps, integration_step
 
-def initialize_to_fp(cfg, model, sample):
-    _, _, activations, init_steps = run(model, pc_step, sample,
+def initialize_to_fp(cfg, model, opt, sample):
+    pc_step_fn = _make_step_fn(pc_step, opt)
+    _, _, activations, init_steps = run(model, pc_step_fn, sample,
                                         disable_tqdm=True,
                                         tau=cfg.dynamics.time_constant,
                                         tolerance_style=cfg.dynamics.tolerance_style,
@@ -120,15 +128,15 @@ def initialize_to_fp(cfg, model, sample):
 
     return init_v_fp, init_vjps
 
-def test_sample(cfg, rngs, model, x, y, loss_fn = mse):
+def test_sample(cfg, rngs, model, opt, x, y, loss_fn = mse):
     init_activations = model.get_activations()
     fp_input = jrng.normal(rngs.train(), x.shape) * 1e-1
-    _, init_vjps = initialize_to_fp(cfg, model, fp_input)
-    pred, _, _, _ = run(model, approx_pc_step, x,
+    _, init_vjps = initialize_to_fp(cfg, model, opt, fp_input)
+    approx_step_fn = _make_step_fn(approx_pc_step, opt)
+    pred, _, _, _ = run(model, approx_step_fn, x,
                         disable_tqdm=True,
                         vjps=init_vjps,
                         tau=cfg.dynamics.time_constant,
-                        eta=cfg.training.learning_rate,
                         min_timesteps=cfg.dynamics.min_timesteps,
                         max_timesteps=cfg.dynamics.max_timesteps,
                         tolerance=cfg.dynamics.convergence_tolerance,
@@ -140,7 +148,7 @@ def test_sample(cfg, rngs, model, x, y, loss_fn = mse):
 
     return pred, error_val, loss_val
 
-def train_epoch(cfg, rngs, model, dataset_trn, loss_fn, epoch, integration_step):
+def train_epoch(cfg, rngs, model, opt, dataset_trn, loss_fn, epoch, integration_step):
     epoch_nudge_counts = []
     epoch_timestep_counts = []
     epoch_errors = []
@@ -150,13 +158,14 @@ def train_epoch(cfg, rngs, model, dataset_trn, loss_fn, epoch, integration_step)
     for sample_idx, (x, y) in tqdm(enumerate(dataset_trn), desc="training", position=1, leave=False):
         global_sample_idx = sample_idx + len(dataset_trn) * epoch
         x, y = jnp.array(x), jnp.array(y)
-        v_fp, vjps = initialize_to_fp(cfg, model, x)
+        v_fp, vjps = initialize_to_fp(cfg, model, opt, x)
         nudge_count, total_timesteps, v_fp, vjps, integration_step = runs_with_nudges(
             cfg,
             rngs,
             x,
             y,
             model,
+            opt,
             v_fp,
             vjps,
             epoch,
@@ -166,7 +175,7 @@ def train_epoch(cfg, rngs, model, dataset_trn, loss_fn, epoch, integration_step)
         )
 
         # Evaluate using test_sample for comparable metrics
-        pred, error_val, loss_val = test_sample(cfg, rngs, model, x, y, loss_fn=loss_fn)
+        pred, error_val, loss_val = test_sample(cfg, rngs, model, opt, x, y, loss_fn=loss_fn)
 
         # Log summary metrics for this sample
         epoch_nudge_counts.append(nudge_count)
@@ -194,7 +203,7 @@ def train_epoch(cfg, rngs, model, dataset_trn, loss_fn, epoch, integration_step)
 
     return integration_step
 
-def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch, loss_fn = mse, log_group = "test"):
+def test_epoch(cfg, model, opt, v_fp, vjps, dataset_tst, epoch, loss_fn = mse, log_group = "test"):
     epoch_errors = []
     epoch_losses = []
     epoch_accuracies = []
@@ -205,7 +214,8 @@ def test_epoch(cfg, model, v_fp, vjps, dataset_tst, epoch, loss_fn = mse, log_gr
         model.set_activations(v_fp)
 
         # Run dynamics until convergence
-        pred, _, _, timesteps = run(model, approx_pc_step, x,
+        approx_step_fn = _make_step_fn(approx_pc_step, opt)
+        pred, _, _, timesteps = run(model, approx_step_fn, x,
                                     disable_tqdm=True,
                                     vjps=vjps,
                                     tau=cfg.dynamics.time_constant,
@@ -278,6 +288,13 @@ def main(cfg):
     elif loss == "crossentropy":
         loss_fn = softmax_cross_entropy
 
+    if cfg.training.adam:
+        opt = nnx.Optimizer(model,
+                            optax.adamw(learning_rate=cfg.training.learning_rate, weight_decay=1e-5),
+                            wrt=nnx.Param)
+    else:
+        opt = nnx.Optimizer(model, optax.sgd(learning_rate=cfg.training.learning_rate), wrt=nnx.Param)
+
     # Load datasets
     transforms = default_data_transforms(cfg.data)
     data = load_dataset(cfg.data, rngs.data(), transforms)
@@ -306,9 +323,9 @@ def main(cfg):
     # Initial test epoch
     integration_step = 0
     fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
-    init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
-    test_epoch(cfg, model, init_v_fp, init_vjps, trn_loader, 0, loss_fn=loss_fn, log_group="train")
-    test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, 0, loss_fn=loss_fn)
+    init_v_fp, init_vjps = initialize_to_fp(cfg, model, opt, fp_input)
+    test_epoch(cfg, model, opt, init_v_fp, init_vjps, trn_loader, 0, loss_fn=loss_fn, log_group="train")
+    test_epoch(cfg, model, opt, init_v_fp, init_vjps, tst_loader, 0, loss_fn=loss_fn)
     if cfg.profile:
         with jax.profiler.trace("/tmp/jax-trace", create_perfetto_trace=False):
             for epoch in tqdm(range(1, cfg.training.epochs + 1), desc="epochs", position=0, leave=True):
@@ -316,14 +333,15 @@ def main(cfg):
                     cfg,
                     rngs,
                     model,
+                    opt,
                     trn_loader,
                     loss_fn,
                     epoch,
                     integration_step,
                 )
                 fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
-                init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
-                test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, epoch, loss_fn=loss_fn)
+                init_v_fp, init_vjps = initialize_to_fp(cfg, model, opt, fp_input)
+                test_epoch(cfg, model, opt, init_v_fp, init_vjps, tst_loader, epoch, loss_fn=loss_fn)
                 save_checkpoint(checkpoint_manager, model, epoch)
     else:
         for epoch in tqdm(range(1, cfg.training.epochs + 1), desc="epochs", position=0, leave=True):
@@ -331,14 +349,15 @@ def main(cfg):
                 cfg,
                 rngs,
                 model,
+                opt,
                 trn_loader,
                 loss_fn,
                 epoch,
                 integration_step,
             )
             fp_input = jrng.normal(rngs.train(), (cfg.training.batch_size, *input_shape)) * 1e-1
-            init_v_fp, init_vjps = initialize_to_fp(cfg, model, fp_input)
-            test_epoch(cfg, model, init_v_fp, init_vjps, tst_loader, epoch, loss_fn=loss_fn)
+            init_v_fp, init_vjps = initialize_to_fp(cfg, model, opt, fp_input)
+            test_epoch(cfg, model, opt, init_v_fp, init_vjps, tst_loader, epoch, loss_fn=loss_fn)
             save_checkpoint(checkpoint_manager, model, epoch)
 
 
