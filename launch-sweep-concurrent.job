@@ -1,0 +1,93 @@
+#!/bin/bash
+#SBATCH --job-name=pc-dfc-sweep
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=64GB
+#SBATCH --partition=gpuq
+#SBATCH --qos=default
+#SBATCH --time=48:00:00
+#SBATCH --gres=gpu:h100:1
+#SBATCH --output=slurm-logs/%x_%A.out
+#SBATCH --error=slurm-logs/%x_%A.err
+
+# Run a W&B sweep using multiple agents that share this job's single GPU.
+#
+# Usage:
+#   sbatch launch-sweep-concurrent.job sweeps/<sweep>.yaml [max_parallel_runs]
+#
+# `max_parallel_runs` defaults to the number of expected sweep runs.  Set it
+# according to the GPU memory needed by each run (for example, 2 or 4).
+
+set -uo pipefail
+
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+    echo "Usage: $0 SWEEP_FILE [MAX_PARALLEL_RUNS]" >&2
+    exit 2
+fi
+
+SWEEP_FILE=$1
+
+# Create the sweep once, just as launch-sweep.job does.
+read SLURM_SWEEP_ID NJOBS <<< "$(uv run setup-sweep.py "$SWEEP_FILE" | tail -n 1)"
+export SLURM_SWEEP_ID
+
+if ! [[ $NJOBS =~ ^[1-9][0-9]*$ ]]; then
+    echo "Could not determine a positive run count for sweep ${SLURM_SWEEP_ID:-<unknown>}." >&2
+    exit 1
+fi
+
+MAX_PARALLEL_RUNS=${2:-$NJOBS}
+if ! [[ $MAX_PARALLEL_RUNS =~ ^[1-9][0-9]*$ ]]; then
+    echo "MAX_PARALLEL_RUNS must be a positive integer." >&2
+    exit 2
+fi
+
+WORKERS=$MAX_PARALLEL_RUNS
+if (( WORKERS > NJOBS )); then
+    WORKERS=$NJOBS
+fi
+
+echo "Running sweep ${SLURM_SWEEP_ID}: ${NJOBS} runs with up to ${WORKERS} concurrent agents"
+echo "GPU: ${CUDA_VISIBLE_DEVICES:-not set}"
+
+# JAX normally reserves most of a GPU on first use.  Do not overwrite an
+# explicit user setting, but make sharing the allocated GPU work by default.
+export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
+export PYTHONFAULTHANDLER=1
+
+mkdir -p slurm-logs
+
+declare -a PIDS=()
+declare -a WORKER_RUNS=()
+
+# Give each agent a fixed number of runs.  This launches exactly NJOBS agent
+# runs while keeping no more than WORKERS Python processes active at once.
+BASE_RUNS=$((NJOBS / WORKERS))
+REMAINDER=$((NJOBS % WORKERS))
+
+for ((worker = 0; worker < WORKERS; worker++)); do
+    count=$BASE_RUNS
+    if (( worker < REMAINDER )); then
+        count=$((count + 1))
+    fi
+
+    log_file="slurm-logs/${SLURM_JOB_NAME:-pc-dfc-sweep}_${SLURM_JOB_ID:-local}_agent-${worker}.out"
+    echo "Starting agent ${worker} for ${count} run(s); log: ${log_file}"
+    uv run wandb agent \
+        --entity "mitra-ryan-kyle" \
+        --project "pc-dfc" \
+        --count "$count" \
+        "$SLURM_SWEEP_ID" >"$log_file" 2>&1 &
+    PIDS[$worker]=$!
+    WORKER_RUNS[$worker]=$count
+done
+
+status=0
+for ((worker = 0; worker < WORKERS; worker++)); do
+    if ! wait "${PIDS[$worker]}"; then
+        echo "Agent ${worker} failed after being assigned ${WORKER_RUNS[$worker]} run(s)." >&2
+        status=1
+    fi
+done
+
+exit "$status"

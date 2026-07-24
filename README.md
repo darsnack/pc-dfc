@@ -27,3 +27,16 @@ To run a sweep, create a new YAML file under `sweeps/`, then do:
 ```
 sbatch launch-sweep.job sweeps/<your yaml file>
 ```
+
+That command keeps the existing behavior: it submits one GPU Slurm job for
+each sweep run. To run several sweep configurations concurrently on one GPU
+allocation instead, use:
+```
+sbatch launch-sweep-concurrent.job sweeps/<your yaml file> <max parallel runs>
+```
+
+For example, `sbatch launch-sweep-concurrent.job sweeps/my-sweep.yaml 4`
+allocates one GPU and runs up to four W&B agents concurrently. Choose the
+parallelism based on per-run GPU memory use. Omitting `<max parallel runs>`
+starts all expected sweep runs at once. Each agent's output is written to its
+own file under `slurm-logs/`.
