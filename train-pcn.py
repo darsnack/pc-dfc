@@ -20,7 +20,7 @@ from projectlib.utils import noop, get_model_params, compute_param_change_norm, 
 def make_step_fn(nmodels, loss_fn, opt):
     if nmodels <= 1:
         def step(model, x, **kwargs):
-            return pc_step(model, opt, x, **kwargs)
+            return pc_step(model, opt, x, loss_fn=loss_fn, **kwargs)
     else:
         model_axes = nnx.StateAxes({...: 0})
         def step(model, x, **kwargs):

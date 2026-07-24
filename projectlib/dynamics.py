@@ -23,12 +23,12 @@ def pc_step(model: nnx.Module, opt: nnx.Optimizer, x, tau = 1, rclamp = None, le
             return pc_error(model.activations, model.activations_ff), pred
     else:
         def _compute_pc_error(model, x, rclamp):
-            _ = model(x, rclamp)
+            pred = model(x, rclamp)
             free_energy = pc_error(model.activations[:-1], model.activations_ff[:-1])
             # when rclamp != None, model.activations[-1] == rclamp
             final_error = loss_fn(model.activations_ff[-1], model.activations[-1])
 
-            return free_energy + final_error
+            return free_energy + final_error, pred
 
     acts_only = Activation
     if not learn:
