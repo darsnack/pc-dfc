@@ -1,13 +1,11 @@
-program: train-pcn.py
-name: pcn_nudges_learning_rate_sweep
+program: train-approx-pc.py
+name: apx_pc_mnist_lr
 method: grid
 parameters:
   data:
     value: mnist
   model.activation_fn:
     value: tanh
-  nudge.enabled:
-    value: true
   # use this format for nesting
   # cause otherwise hydra is confused
   # (see https://github.com/wandb/wandb/issues/4686#issuecomment-2407556397)
@@ -32,10 +30,10 @@ parameters:
 command:
 - ${env}
 - PYTHONFAULTHANDLER=1
-- XLA_PYTHON_CLIENT_PREALLOCATE=1
+- XLA_PYTHON_CLIENT_PREALLOCATE=0
 - uv
 - run
 - ${program}
 # this is hydra interpolation not wandb
-- hydra.run.dir=./outputs/pcn_learning_rate_sweep/lr_${training.learning_rate}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+- hydra.run.dir=./outputs/apx_pc_mnist_lr/lr_${training.learning_rate}/${now:%Y-%m-%d}/${now:%H-%M-%S}
 - ${args_no_hyphens}

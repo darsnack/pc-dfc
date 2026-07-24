@@ -11,6 +11,7 @@ parameters:
   # (see https://github.com/wandb/wandb/issues/4686#issuecomment-2407556397)
   training.learning_rate:
     values:
+      - 0.001
       - 0.0001
       - 0.00001
       - 0.000001
@@ -31,7 +32,7 @@ parameters:
 command:
 - ${env}
 - PYTHONFAULTHANDLER=1
-- XLA_PYTHON_CLIENT_PREALLOCATE=1
+- XLA_PYTHON_CLIENT_PREALLOCATE=0
 - uv
 - run
 - ${program}

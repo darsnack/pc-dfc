@@ -1,5 +1,5 @@
-program: train-approx-pc.py
-name: approx_pc_learning_rate_sweep
+program: train-pcn.py
+name: pc_mnist_lr`
 method: grid
 parameters:
   data:
@@ -30,10 +30,10 @@ parameters:
 command:
 - ${env}
 - PYTHONFAULTHANDLER=1
-- XLA_PYTHON_CLIENT_PREALLOCATE=1
+- XLA_PYTHON_CLIENT_PREALLOCATE=0
 - uv
 - run
 - ${program}
 # this is hydra interpolation not wandb
-- hydra.run.dir=./outputs/approx_pc_learning_rate_sweep/lr_${training.learning_rate}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+- hydra.run.dir=./outputs/pc_mnist_lr/lr_${training.learning_rate}/${now:%Y-%m-%d}/${now:%H-%M-%S}
 - ${args_no_hyphens}

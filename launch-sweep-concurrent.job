@@ -1,53 +1,60 @@
 #!/bin/bash
 #SBATCH --job-name=pc-dfc-sweep
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=64GB
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=32GB
 #SBATCH --partition=gpuq
-#SBATCH --qos=default
+#SBATCH --qos=bio_ai
 #SBATCH --time=48:00:00
 #SBATCH --gres=gpu:h100:1
 #SBATCH --output=slurm-logs/%x_%A.out
 #SBATCH --error=slurm-logs/%x_%A.err
 
-# Run a W&B sweep using multiple agents that share this job's single GPU.
+# Run a portion of a W&B sweep using multiple agents that share this job's
+# single GPU. This is submitted as an array by launch-sweep.job.
 #
 # Usage:
-#   sbatch launch-sweep-concurrent.job sweeps/<sweep>.yaml [max_parallel_runs]
+#   launch-sweep.job sweeps/<sweep>.yaml <runs-per-gpu-job>
 #
-# `max_parallel_runs` defaults to the number of expected sweep runs.  Set it
-# according to the GPU memory needed by each run (for example, 2 or 4).
+# launch-sweep.job creates the W&B sweep and exports SLURM_SWEEP_ID and NJOBS.
+# Each array task consumes up to RUNS_PER_GPU_JOB sweep runs.
 
 set -uo pipefail
 
-if [[ $# -lt 1 || $# -gt 2 ]]; then
-    echo "Usage: $0 SWEEP_FILE [MAX_PARALLEL_RUNS]" >&2
+if [[ $# -ne 1 ]]; then
+    echo "Usage: $0 RUNS_PER_GPU_JOB" >&2
     exit 2
 fi
 
-SWEEP_FILE=$1
+RUNS_PER_GPU_JOB=$1
+if ! [[ $RUNS_PER_GPU_JOB =~ ^[1-9][0-9]*$ ]]; then
+    echo "RUNS_PER_GPU_JOB must be a positive integer." >&2
+    exit 2
+fi
 
-# Create the sweep once, just as launch-sweep.job does.
-read SLURM_SWEEP_ID NJOBS <<< "$(uv run setup-sweep.py "$SWEEP_FILE" | tail -n 1)"
-export SLURM_SWEEP_ID
-
-if ! [[ $NJOBS =~ ^[1-9][0-9]*$ ]]; then
-    echo "Could not determine a positive run count for sweep ${SLURM_SWEEP_ID:-<unknown>}." >&2
+if [[ -z ${SLURM_SWEEP_ID:-} || ! ${NJOBS:-} =~ ^[1-9][0-9]*$ ]]; then
+    echo "SLURM_SWEEP_ID and a positive NJOBS must be exported by launch-sweep.job." >&2
     exit 1
 fi
 
-MAX_PARALLEL_RUNS=${2:-$NJOBS}
-if ! [[ $MAX_PARALLEL_RUNS =~ ^[1-9][0-9]*$ ]]; then
-    echo "MAX_PARALLEL_RUNS must be a positive integer." >&2
-    exit 2
+ARRAY_INDEX=${SLURM_ARRAY_TASK_ID:-0}
+if ! [[ $ARRAY_INDEX =~ ^[0-9]+$ ]]; then
+    echo "SLURM_ARRAY_TASK_ID must be a non-negative integer." >&2
+    exit 1
 fi
 
-WORKERS=$MAX_PARALLEL_RUNS
-if (( WORKERS > NJOBS )); then
-    WORKERS=$NJOBS
+FIRST_RUN=$((ARRAY_INDEX * RUNS_PER_GPU_JOB))
+REMAINING_RUNS=$((NJOBS - FIRST_RUN))
+if (( REMAINING_RUNS <= 0 )); then
+    echo "Array task ${ARRAY_INDEX} has no sweep runs assigned." >&2
+    exit 1
+fi
+WORKERS=$RUNS_PER_GPU_JOB
+if (( WORKERS > REMAINING_RUNS )); then
+    WORKERS=$REMAINING_RUNS
 fi
 
-echo "Running sweep ${SLURM_SWEEP_ID}: ${NJOBS} runs with up to ${WORKERS} concurrent agents"
+echo "Running sweep ${SLURM_SWEEP_ID}: array task ${ARRAY_INDEX} runs ${FIRST_RUN} through $((FIRST_RUN + WORKERS - 1)) with ${WORKERS} concurrent agents"
 echo "GPU: ${CUDA_VISIBLE_DEVICES:-not set}"
 
 # JAX normally reserves most of a GPU on first use.  Do not overwrite an
@@ -60,26 +67,16 @@ mkdir -p slurm-logs
 declare -a PIDS=()
 declare -a WORKER_RUNS=()
 
-# Give each agent a fixed number of runs.  This launches exactly NJOBS agent
-# runs while keeping no more than WORKERS Python processes active at once.
-BASE_RUNS=$((NJOBS / WORKERS))
-REMAINDER=$((NJOBS % WORKERS))
-
 for ((worker = 0; worker < WORKERS; worker++)); do
-    count=$BASE_RUNS
-    if (( worker < REMAINDER )); then
-        count=$((count + 1))
-    fi
-
     log_file="slurm-logs/${SLURM_JOB_NAME:-pc-dfc-sweep}_${SLURM_JOB_ID:-local}_agent-${worker}.out"
-    echo "Starting agent ${worker} for ${count} run(s); log: ${log_file}"
+    echo "Starting agent ${worker} for 1 run; log: ${log_file}"
     uv run wandb agent \
         --entity "mitra-ryan-kyle" \
         --project "pc-dfc" \
-        --count "$count" \
+        --count 1 \
         "$SLURM_SWEEP_ID" >"$log_file" 2>&1 &
     PIDS[$worker]=$!
-    WORKER_RUNS[$worker]=$count
+    WORKER_RUNS[$worker]=1
 done
 
 status=0

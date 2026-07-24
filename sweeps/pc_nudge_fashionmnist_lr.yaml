@@ -32,7 +32,7 @@ parameters:
 command:
 - ${env}
 - PYTHONFAULTHANDLER=1
-- XLA_PYTHON_CLIENT_PREALLOCATE=1
+- XLA_PYTHON_CLIENT_PREALLOCATE=0
 - uv
 - run
 - ${program}

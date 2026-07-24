@@ -9,18 +9,37 @@
 #SBATCH --output=slurm-logs/%x_%A_%a.out ### Slurm Output file, %x is job name, %A is array job id, %a is array job index
 #SBATCH --error=slurm-logs/%x_%A_%a.out  ### Slurm Error file, %x is job name, %A is array job id, %a is array job index
 
-# run sweep setup
-# first arg is sweep file path
-read SLURM_SWEEP_ID NJOBS <<< "$( uv run setup-sweep.py $1 | tail -n 1 )"
-export SLURM_SWEEP_ID
-echo "Running sweep with ID = ${SLURM_SWEEP_ID} and NJOBS = ${NJOBS}"
+set -uo pipefail
 
-# run sweep jobs
-sbatch\
-    --export=ALL\
-    --array=0-$((${NJOBS}-1))\
+if [[ $# -ne 2 ]]; then
+    echo "Usage: $0 SWEEP_FILE RUNS_PER_GPU_JOB" >&2
+    exit 2
+fi
+
+SWEEP_FILE=$1
+RUNS_PER_GPU_JOB=$2
+if ! [[ $RUNS_PER_GPU_JOB =~ ^[1-9][0-9]*$ ]]; then
+    echo "RUNS_PER_GPU_JOB must be a positive integer." >&2
+    exit 2
+fi
+
+# Create the sweep once, then divide its runs among GPU jobs. Each GPU job
+# starts up to RUNS_PER_GPU_JOB agents on its single allocated GPU.
+read SLURM_SWEEP_ID NJOBS <<< "$(uv run setup-sweep.py "$SWEEP_FILE" | tail -n 1)"
+if ! [[ $NJOBS =~ ^[1-9][0-9]*$ ]]; then
+    echo "Could not determine a positive run count for sweep ${SLURM_SWEEP_ID:-<unknown>}." >&2
+    exit 1
+fi
+
+GPU_JOBS=$(((NJOBS + RUNS_PER_GPU_JOB - 1) / RUNS_PER_GPU_JOB))
+export SLURM_SWEEP_ID NJOBS
+echo "Running sweep ${SLURM_SWEEP_ID}: ${NJOBS} runs across ${GPU_JOBS} GPU job(s), up to ${RUNS_PER_GPU_JOB} run(s) per GPU job"
+
+sbatch \
+    --export=ALL \
+    --array=0-$((GPU_JOBS - 1)) \
     --job-name=pc-dfc-sweep-${SLURM_SWEEP_ID}\
     --qos=bio_ai\
     --time=48:00:00\
     --exclude=bamgpu100,bamgpu101\
-    launch-slurm.job "${@:2}"
+    launch-sweep-concurrent.job "$RUNS_PER_GPU_JOB"
