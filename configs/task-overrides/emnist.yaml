@@ -6,8 +6,10 @@ nudge:
   max_count: 500
   convergence_tolerance: 1e-2
 model:
-  layer_dims: [784, 256, 256, 128, 47] # including input/output dims.
+  layer_dims: [1, 32, 64, 128]
   activation_fn: tanh # noop or tanh
+  conv: true
 training:
-  batch_size: 1024
-  learning_rate: 0.001
+  batch_size: 256
+  learning_rate: 1e-5
+  adam: true

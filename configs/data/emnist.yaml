@@ -1,4 +1,6 @@
 name: emnist
 split: balanced
+input_shape: [28, 28, 1]
+nclasses: 47
 flatten: true
 normalize: true

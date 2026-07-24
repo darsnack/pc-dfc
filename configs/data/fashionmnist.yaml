@@ -1,3 +1,5 @@
 name: fashionmnist
+input_shape: [28, 28, 1]
+nclasses: 10
 flatten: true
 normalize: true

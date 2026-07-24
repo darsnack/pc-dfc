@@ -20,6 +20,7 @@ model:
   activation_fn: noop # noop or tanh
   kernel_init_scale: 1.0
   use_bias: true
+  conv: false
 nmodels: 1
 seed: 0
 loss: mse

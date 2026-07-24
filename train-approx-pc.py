@@ -12,7 +12,7 @@ from optax.losses import softmax_cross_entropy
 from omegaconf import OmegaConf
 from tqdm.auto import tqdm
 
-from projectlib.models import MLP, Activation
+from projectlib.models import MLP, CNN, Activation
 from projectlib.dynamics import pc_step, current_pc_vjp, approx_pc_step, run
 from projectlib.data import load_dataset, build_dataloader, default_data_transforms
 from projectlib.utils import (noop,
@@ -22,12 +22,10 @@ from projectlib.utils import (noop,
                               save_checkpoint,
                               mse)
 
-
 def _make_step_fn(step_fn, opt):
     def step(model, x, **kwargs):
         return step_fn(model, opt, x, **kwargs)
     return step
-
 
 def load_checkpoint(checkpoint_path, model, sample_input=None):
     checkpoint_manager = ocp.CheckpointManager(
@@ -67,6 +65,7 @@ def runs_with_nudges(cfg, rngs, x, y, model, opt, v_fp, vjps, epoch, sample_idx,
         approx_step_fn = _make_step_fn(approx_pc_step, opt)
         _, _, activations, timesteps = run(model, approx_step_fn, x,
                                            disable_tqdm=True,
+                                           batched=cfg.training.batch_size >= 1,
                                            vjps=vjps,
                                            tau=cfg.dynamics.time_constant,
                                            min_timesteps=cfg.dynamics.min_timesteps,
@@ -116,6 +115,7 @@ def initialize_to_fp(cfg, model, opt, sample):
     pc_step_fn = _make_step_fn(pc_step, opt)
     _, _, activations, init_steps = run(model, pc_step_fn, sample,
                                         disable_tqdm=True,
+                                        batched=cfg.training.batch_size >= 1,
                                         tau=cfg.dynamics.time_constant,
                                         tolerance_style=cfg.dynamics.tolerance_style,
                                         learn=False)
@@ -135,6 +135,7 @@ def test_sample(cfg, rngs, model, opt, x, y, loss_fn = mse):
     approx_step_fn = _make_step_fn(approx_pc_step, opt)
     pred, _, _, _ = run(model, approx_step_fn, x,
                         disable_tqdm=True,
+                        batched=cfg.training.batch_size >= 1,
                         vjps=init_vjps,
                         tau=cfg.dynamics.time_constant,
                         min_timesteps=cfg.dynamics.min_timesteps,
@@ -217,6 +218,7 @@ def test_epoch(cfg, model, opt, v_fp, vjps, dataset_tst, epoch, loss_fn = mse, l
         approx_step_fn = _make_step_fn(approx_pc_step, opt)
         pred, _, _, timesteps = run(model, approx_step_fn, x,
                                     disable_tqdm=True,
+                                    batched=cfg.training.batch_size >= 1,
                                     vjps=vjps,
                                     tau=cfg.dynamics.time_constant,
                                     min_timesteps=cfg.dynamics.min_timesteps,
@@ -265,21 +267,39 @@ def main(cfg):
         raise ValueError(f"Unknown activation fn: {cfg.model.activation_fn}")
     # Vmap over batch_size >= 1 so stored activations are appropriately sized
     if cfg.training.batch_size >= 1:
-        with nnx.split_rngs(rngs, splits=cfg.training.batch_size, only="activations"):
-            state_axes = nnx.StateAxes({(Activation, "activations"): 0, ...: None})
-            model = nnx.vmap(lambda r:
-                MLP(cfg.model.layer_dims,
-                    activation_fn=activation_fn,
-                    kernel_init_scale=cfg.model.get("kernel_init_scale", 1.0),
-                    use_bias=cfg.model.get("use_bias", True),
-                    rngs=r),
-            in_axes=(state_axes,), out_axes=state_axes)(rngs)
+        if cfg.model.conv:
+            with nnx.split_rngs(rngs, splits=cfg.training.batch_size, only="activations"):
+                state_axes = nnx.StateAxes({(Activation, "activations"): 0, ...: None})
+                model = nnx.vmap(lambda r:
+                    CNN(cfg.model.layer_dims, cfg.data.input_shape, cfg.data.nclasses,
+                        activation_fn=activation_fn,
+                        kernel_init_scale=cfg.model.get("kernel_init_scale", 1.0),
+                        use_bias=cfg.model.get("use_bias", True),
+                        rngs=r),
+                in_axes=(state_axes,), out_axes=state_axes)(rngs)
+        else:
+            with nnx.split_rngs(rngs, splits=cfg.training.batch_size, only="activations"):
+                state_axes = nnx.StateAxes({(Activation, "activations"): 0, ...: None})
+                model = nnx.vmap(lambda r:
+                    MLP(cfg.model.layer_dims,
+                        activation_fn=activation_fn,
+                        kernel_init_scale=cfg.model.get("kernel_init_scale", 1.0),
+                        use_bias=cfg.model.get("use_bias", True),
+                        rngs=r),
+                in_axes=(state_axes,), out_axes=state_axes)(rngs)
     else:
-        model = MLP(cfg.model.layer_dims,
-                    activation_fn=activation_fn,
-                    kernel_init_scale=cfg.model.get("kernel_init_scale", 1.0),
-                    use_bias=cfg.model.get("use_bias", True),
-                    rngs=rngs)
+        if cfg.model.conv:
+            model = CNN(cfg.model.layer_dims, cfg.data.input_shape, cfg.data.nclasses,
+                        activation_fn=activation_fn,
+                        kernel_init_scale=cfg.model.get("kernel_init_scale", 1.0),
+                        use_bias=cfg.model.get("use_bias", True),
+                        rngs=rngs)
+        else:
+            model = MLP(cfg.model.layer_dims,
+                        activation_fn=activation_fn,
+                        kernel_init_scale=cfg.model.get("kernel_init_scale", 1.0),
+                        use_bias=cfg.model.get("use_bias", True),
+                        rngs=rngs)
 
     # Get loss function
     loss = cfg.get("loss")

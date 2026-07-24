@@ -4,8 +4,6 @@ method: grid
 parameters:
   data:
     value: emnist
-  model.activation_fn:
-    value: tanh
   # use this format for nesting
   # cause otherwise hydra is confused
   # (see https://github.com/wandb/wandb/issues/4686#issuecomment-2407556397)
@@ -19,8 +17,6 @@ parameters:
       - 0.000000001
   training.epochs:
     value: 100
-  training.adam:
-    value: true
   seed:
     values:
       - 0

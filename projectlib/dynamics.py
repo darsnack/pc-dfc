@@ -8,14 +8,12 @@ from projectlib.models import Activation
 
 def pc_error(vs, vs_ff):
     # TODO: add loss here for PCN variant that can incorporate cross entropy
-    min_samples = min(vs[0].shape[0], vs_ff[0].shape[0])
-    total_energy = 0.5 * sum(jnp.sum((v[:min_samples] - v_ff[:min_samples]) ** 2, axis=-1)
-                             for v, v_ff in zip(vs, vs_ff))
+    return 0.5 * sum(jnp.sum((v - v_ff) ** 2)
+                     for v, v_ff in zip(vs, vs_ff))
 
-    return total_energy
-
-@nnx.jit(static_argnames=("learn",))
-def pc_step(model: nnx.Module, opt: nnx.Optimizer, x, tau = 1, rclamp = None, learn = False, loss_fn = None):
+@nnx.jit(static_argnames=("learn", "batched", "loss_fn"))
+def pc_step(model: nnx.Module, opt: nnx.Optimizer, x, tau = 1, rclamp = None,
+            learn = False, loss_fn = None, batched = False):
     if loss_fn is None:
         def _compute_pc_error(model, x, rclamp):
             pred = model(x, rclamp)
@@ -44,7 +42,7 @@ def pc_step(model: nnx.Module, opt: nnx.Optimizer, x, tau = 1, rclamp = None, le
                                      argnums=nnx.DiffState(0, (acts_only, nnx.Param)),
                                      has_aux=True)
 
-    if x.ndim > 1:
+    if batched:
         state_axes = nnx.StateAxes({Activation: 0, nnx.Intermediate: 0, ...: None})
         clamp_axes = None if rclamp is None else 0
         grad_fn = nnx.vmap(grad_fn, in_axes=(state_axes, 0, clamp_axes), out_axes=0)
@@ -82,12 +80,35 @@ def current_pc_vjp(model: nnx.Module, x):
 
     return vjps
 
-@nnx.jit(static_argnames=("learn",))
+@nnx.jit
+def current_param_vjp(model: nnx.Module, x):
+    layer_inputs = (x, *(model.activation_fn(v.value)
+                         for v in model.activations[:-1]))
+    param_vjps = []
+    for layer, layer_input in zip(model.layers, layer_inputs):
+        graph, params, other_state = nnx.split(layer, nnx.Param, ...)
+        # trick to call forward pass of split model = graph + state
+        def call(_params, _graph=graph, _other_state=other_state,
+                 _layer_input=layer_input):
+            layer_with_params = nnx.merge(_graph, _params, _other_state)
+            return layer_with_params(_layer_input)
+        # run forward direction for each layer, storing the VJPs w.r.t. params
+        param_vjps.append(jax.vjp(call, params)[1])
+
+    return param_vjps
+
+@nnx.jit(static_argnames=("learn", "batched"))
 def approx_pc_step(model: nnx.Module, opt: nnx.Optimizer, x, vjps,
-                   k = 1, tau = 1, rclamp = None, learn = False):
+                   k = 1, tau = 1, rclamp = None, learn = False,
+                   batched = False):
     # evaluate bottom up activations
     pred = model(x, rclamp)
-    total_energy = pc_error(model.activations, model.activations_ff)
+    if batched:
+        total_energy = jax.vmap(pc_error)(
+            tuple(v.value for v in model.activations),
+            tuple(model.activations_ff))
+    else:
+        total_energy = pc_error(model.activations, model.activations_ff)
     # compute error signal
     # note that r_final = identity(model.activations_ff[-1])
     # change this to reflect non-identity activation (e.g. softmax)
@@ -98,32 +119,19 @@ def approx_pc_step(model: nnx.Module, opt: nnx.Optimizer, x, vjps,
         dvs = [(-model.activations[-1] + model.activations_ff[-1]) / tau]
     else:
         dvs = [0]
-    dws = []
-    if model.use_bias:
-        dbs = []
+    param_vjps = current_param_vjp(model, x) if learn else None
+    # errors are collected in forward layer order below.
+    layer_errors = [None] * len(model.layers)
     # apply error propagation with VJPs starting from next to last layer
     # and working to the front of the network
     error = final_error
-    for act, v_ff, vjp in zip(reversed(model.activations[:-1]),
-                              reversed(model.activations_ff[:-1]),
-                              reversed(vjps[1:])):
+    for layer_idx, (act, v_ff, vjp) in enumerate(zip(reversed(model.activations[:-1]),
+                                                     reversed(model.activations_ff[:-1]),
+                                                     reversed(vjps[1:]))):
         # extract raw array from Activation variable so that JAX
         # functions like tanh can be called on it inside nnx.jit
         v = act.value
-        # compute gradient w.r.t. weights
-        _v = v if v.ndim == 2 else v[None, :]
-        _e = error if error.ndim == 2 else error[None, :]
-        # _v is [B, in_dim]
-        # _e is [B, out_dim]
-        # _v.T @ _e is [in_dim, out_dim] (summed over B)
-        # NOTE: the optimizer applies updates as: parameter - lr * grad.
-        # Negate the original update to preserve the step direction.
-        dw = -model.activation_fn(_v).T @ _e / _e.shape[0]
-        dws.append(dw)
-        if model.use_bias:
-            # _e is [B, out_dim]
-            db = -jnp.sum(_e, axis=0) / _e.shape[0]
-            dbs.append(db)
+        layer_errors[len(model.layers) - 1 - layer_idx] = error
         # propagate error backwards
         # (i.e. running prod_l J^l e^L)
         error = vjp(error)[0]
@@ -132,31 +140,28 @@ def approx_pc_step(model: nnx.Module, opt: nnx.Optimizer, x, vjps,
         # compute dynamics update for activations
         dv = (-v + v_ff + u) / tau
         dvs.append(dv)
-    # compute gradient update for first layer
-    _x = x if x.ndim == 2 else x[None, :]
-    _e = error if error.ndim == 2 else error[None, :]
-    dw = -_x.T @ _e / _e.shape[0]
-    dws.append(dw)
-    if model.use_bias:
-        db = -jnp.sum(_e, axis=0) / _e.shape[0]
-        dbs.append(db)
+    # error at the output of the first layer.
+    layer_errors[0] = error
+
+    # take parameter vjps BEFORE updating activation states
+    if learn:
+        grads = nnx.map_state(
+            lambda _, state: state.replace(jnp.zeros_like(state.value)),
+            nnx.state(model, nnx.Param))
+        for layer_idx, (param_vjp, layer_error) in enumerate(zip(param_vjps, layer_errors)):
+            batch_size = x.shape[0] if batched else 1
+            # the vjp already contracts over every output axis, including the batch axis.
+            # below is equivalent to:
+            #   tree_map(lambda g: -g / batch_size, param_vjp(layer_error)[0])
+            grads["layers"][layer_idx] = param_vjp(-layer_error / batch_size)[0]
 
     # apply dynamics
     for v, dv in zip(model.activations, reversed(dvs)):
         v.value = v.value + dv
     if learn:
-        param_grads = {}
-        for layer_idx, dw in enumerate(reversed(dws)):
-            param_grads[('layers', layer_idx, 'kernel')] = dw
-        if model.use_bias:
-            for layer_idx, db in enumerate(reversed(dbs)):
-                param_grads[('layers', layer_idx, 'bias')] = db
-        grads = nnx.map_state(lambda path, state: state.replace(param_grads[path]),
-                              nnx.state(model, nnx.Param))
         opt.update(grads)
 
     return jnp.mean(total_energy), pred
-
 
 def run(model, step_fn, x,
         min_timesteps = 5,
@@ -166,6 +171,7 @@ def run(model, step_fn, x,
         disable_tqdm = False,
         return_act_history = False,
         nmodels = 1,
+        batched = False,
         **kwargs):
     """Run the model for a specified number of timesteps or until convergence."""
     errors = []
@@ -175,9 +181,11 @@ def run(model, step_fn, x,
     # Loop with tqdm progress bar based on t and max_timesteps
     with tqdm(total=max_timesteps, desc="timesteps", disable=disable_tqdm) as bar:
         while (t < min_timesteps) or ((t < max_timesteps)
-                                      and not is_converged(activations, tolerance, tolerance_style, nmodels)):
+                                      and not is_converged(activations, tolerance,
+                                                           tolerance_style, nmodels,
+                                                           batched)):
             # Run single step of model dynamics
-            error, pred = step_fn(model, x, **kwargs)
+            error, pred = step_fn(model, x, batched=batched, **kwargs)
             # Store activations at this timestep
             for acts, a in zip(activations, model.activations):
                 acts.append(a.value.copy())
@@ -194,21 +202,32 @@ def run(model, step_fn, x,
     return pred, errors, activations, t
 
 
-def is_converged(activations, tolerance, tolerance_style, nmodels=1):
+def is_converged(activations, tolerance, tolerance_style, nmodels=1,
+                 batched=False):
     """Check if the model has converged based on the change in activations."""
     if len(activations[0]) < 2:
         return False
     else:
-        # dvs is [L, ...] where trailing dims are (nmodels, B) or (B,)
-        dvs = jnp.array([jnp.sum((act[-1] - act[-2]) ** 2, axis=-1) for act in activations])
+        # Preserve model and batch axes; reduce every activation/neuron axis.
+        leading_axes = int(nmodels > 1) + int(batched)
+        dvs = jnp.array([
+            jnp.sum((act[-1] - act[-2]) ** 2,
+                    axis=tuple(range(leading_axes, act[-1].ndim)))
+            for act in activations])
         dv_total = jnp.sum(dvs, axis=0)
         if tolerance_style == "norm":
             dist = jnp.sqrt(dv_total)
         else:
-            n_neurons = sum([act.shape[-1] for act in activations])
+            n_neurons = sum(
+                int(jnp.prod(jnp.array(act[-1].shape[leading_axes:])))
+                for act in activations)
             dist = dv_total / n_neurons
 
         if nmodels > 1:
-            return jnp.max(jnp.min(dist, axis=-1)) < tolerance
+            if batched:
+                return jnp.max(jnp.min(dist, axis=-1)) < tolerance
+            return jnp.max(dist) < tolerance
         else:
-            return jnp.min(dist) < tolerance
+            if batched:
+                return jnp.min(dist) < tolerance
+            return dist < tolerance
