@@ -35,5 +35,5 @@ command:
 - run
 - ${program}
 # this is hydra interpolation not wandb
-- hydra.run.dir=./outputs/apx_pc_mnist_lr/lr_${training.learning_rate}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+- hydra.run.dir=./outputs/apx_pc_mnist_lr/lr_${training.learning_rate}_${seed}/${now:%Y-%m-%d}/${now:%H-%M-%S}
 - ${args_no_hyphens}
