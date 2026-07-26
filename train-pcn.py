@@ -12,7 +12,7 @@ from optax.losses import softmax_cross_entropy
 from omegaconf import OmegaConf
 from tqdm.auto import tqdm
 
-from projectlib.models import MLP, Activation
+from projectlib.models import MLP, CNN, Activation
 from projectlib.dynamics import pc_step, run
 from projectlib.data import load_dataset, build_dataloader, default_data_transforms
 from projectlib.utils import noop, get_model_params, compute_param_change_norm, mse
@@ -57,21 +57,39 @@ def make_step_fn(nmodels, loss_fn, opt):
 
 def _create_single_model(rngs, cfg, activation_fn):
     if cfg.training.batch_size >= 1:
-        with nnx.split_rngs(rngs, splits=cfg.training.batch_size, only="activations"):
-            state_axes = nnx.StateAxes({(Activation, "activations"): 0, ...: None})
-            model = nnx.vmap(lambda r:
-                MLP(cfg.model.layer_dims,
-                    activation_fn=activation_fn,
-                    kernel_init_scale=cfg.model.get("kernel_init_scale", 1.0),
-                    use_bias=cfg.model.get("use_bias", True),
-                    rngs=r),
-            in_axes=(state_axes,), out_axes=state_axes)(rngs)
+        if cfg.model.conv:
+            with nnx.split_rngs(rngs, splits=cfg.training.batch_size, only="activations"):
+                state_axes = nnx.StateAxes({(Activation, "activations"): 0, ...: None})
+                model = nnx.vmap(lambda r:
+                    CNN(cfg.model.layer_dims, cfg.data.input_shape, cfg.data.nclasses,
+                        activation_fn=activation_fn,
+                        kernel_init_scale=cfg.model.get("kernel_init_scale", 1.0),
+                        use_bias=cfg.model.get("use_bias", True),
+                        rngs=r),
+                in_axes=(state_axes,), out_axes=state_axes)(rngs)
+        else:
+            with nnx.split_rngs(rngs, splits=cfg.training.batch_size, only="activations"):
+                state_axes = nnx.StateAxes({(Activation, "activations"): 0, ...: None})
+                model = nnx.vmap(lambda r:
+                    MLP(cfg.model.layer_dims,
+                        activation_fn=activation_fn,
+                        kernel_init_scale=cfg.model.get("kernel_init_scale", 1.0),
+                        use_bias=cfg.model.get("use_bias", True),
+                        rngs=r),
+                in_axes=(state_axes,), out_axes=state_axes)(rngs)
     else:
-        model = MLP(cfg.model.layer_dims,
-                    activation_fn=activation_fn,
-                    kernel_init_scale=cfg.model.get("kernel_init_scale", 1.0),
-                    use_bias=cfg.model.get("use_bias", True),
-                    rngs=rngs)
+        if cfg.model.conv:
+            model = CNN(cfg.model.layer_dims, cfg.data.input_shape, cfg.data.nclasses,
+                        activation_fn=activation_fn,
+                        kernel_init_scale=cfg.model.get("kernel_init_scale", 1.0),
+                        use_bias=cfg.model.get("use_bias", True),
+                        rngs=rngs)
+        else:
+            model = MLP(cfg.model.layer_dims,
+                        activation_fn=activation_fn,
+                        kernel_init_scale=cfg.model.get("kernel_init_scale", 1.0),
+                        use_bias=cfg.model.get("use_bias", True),
+                        rngs=rngs)
     return model
 
 def save_checkpoint(checkpoint_manager, model, epoch):
