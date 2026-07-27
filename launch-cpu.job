@@ -1,0 +1,23 @@
+#!/bin/bash
+#SBATCH --job-name=pc-dfc                ### Name of the job
+#SBATCH --ntasks=1                       ### Number of Tasks
+#SBATCH --cpus-per-task=32               ### Number of CPUs per Task
+#SBATCH --mem=64GB                       ### Memory required
+#SBATCH --partition=cpuq
+#SBATCH --qos=fast
+#SBATCH --time=02:00:00
+#SBATCH --output=slurm-logs/%x_%A_%a.out ### Slurm Output file, %x is job name, %A is array job id, %a is array job index
+#SBATCH --error=slurm-logs/%x_%A_%a.out  ### Slurm Error file, %x is job name, %A is array job id, %a is array job index
+
+# Print path for debugging.
+echo "PATH: $PATH"
+
+# Potentially invoked as a W&B sweep.
+if [[ $SLURM_SWEEP_ID ]]; then
+    echo "Setting to sweep with id = ${SLURM_SWEEP_ID}"
+    uv run wandb agent --entity "mitra-ryan-kyle" --project "pc-dfc" --count 1 "$SLURM_SWEEP_ID"
+else
+    # Run command passed to Slurm.
+    echo "Running $@"
+    eval PYTHONFAULTHANDLER=1 uv run $@
+fi
