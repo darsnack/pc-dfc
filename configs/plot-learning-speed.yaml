@@ -1,6 +1,9 @@
-pc_sweep_id: ???
-approx_pc_sweep_id: ???
-pc_nudges_sweep_id: ???
+pc_sweep_id: null
+approx_pc_sweep_id: null
+pc_nudges_sweep_id: null
+# Either strings, or two-item lists for a two-dimensional sweep.
+sweep_var: training.learning_rate
+sweep_label: Learning Rate
 entity: mitra-ryan-kyle
 project: pc-dfc
 cache_dir: ./.wandb_cache
