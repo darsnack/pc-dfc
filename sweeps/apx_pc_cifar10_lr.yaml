@@ -1,0 +1,29 @@
+program: train-approx-pc.py
+name: apx_pc_cifar10_lr
+method: grid
+parameters:
+  data:
+    value: cifar10
+  model.activation_fn:
+    values:
+      - tanh
+      - relu
+  # use this format for nesting
+  # cause otherwise hydra is confused
+  # (see https://github.com/wandb/wandb/issues/4686#issuecomment-2407556397)
+  training.learning_rate:
+    values:
+      - 1e-6
+      - 1e-7
+      - 1e-8
+      - 1e-9
+command:
+- ${env}
+- PYTHONFAULTHANDLER=1
+- XLA_PYTHON_CLIENT_PREALLOCATE=0
+- uv
+- run
+- ${program}
+# this is hydra interpolation not wandb
+- hydra.run.dir=./outputs/apx_pc_cifar10_lr/lr_${training.learning_rate}_${model.activation_fn}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+- ${args_no_hyphens}

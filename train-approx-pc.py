@@ -263,6 +263,8 @@ def main(cfg):
         activation_fn = noop
     elif cfg.model.activation_fn == "tanh":
         activation_fn = nnx.tanh
+    elif cfg.model.activation_fn == "relu":
+        activation_fn = nnx.relu
     else:
         raise ValueError(f"Unknown activation fn: {cfg.model.activation_fn}")
     # Vmap over batch_size >= 1 so stored activations are appropriately sized
