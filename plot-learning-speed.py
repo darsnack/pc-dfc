@@ -54,11 +54,23 @@ def sweep_value_label(value):
 
 
 def sort_sweep_values(values):
-    """Sort numeric sweeps numerically while allowing categorical sweep variables."""
+    """Sort scalar sweep values, retaining order for non-scalar values."""
+    values = list(values)
+    if any(isinstance(value, (list, dict, set)) for value in values):
+        return values
     try:
         return sorted(values, key=float)
     except (TypeError, ValueError):
         return sorted(values, key=lambda value: str(value))
+
+
+def unique_sweep_values(values):
+    """Return values in first-seen order, including unhashable config values."""
+    unique_values = []
+    for value in values:
+        if value not in unique_values:
+            unique_values.append(value)
+    return unique_values
 
 
 def normalize_sweep_config(sweep_var, sweep_label):
@@ -215,9 +227,9 @@ def _accuracy_vs_integration_step_common(all_data, sweep_vars, sweep_values):
     palette = METHOD_PALETTE
 
     all_records = []
-    nan_methods_by_value = {}
-    for sweep_value in sweep_values:
-        nan_methods_by_value[sweep_value] = []
+    nan_methods_by_index = {}
+    for sweep_idx, sweep_value in enumerate(sweep_values):
+        nan_methods_by_index[sweep_idx] = []
         for method_key in METHOD_KEYS:
             if method_key not in all_data:
                 continue
@@ -225,11 +237,11 @@ def _accuracy_vs_integration_step_common(all_data, sweep_vars, sweep_values):
             nan_runs = [r for r in runs if r["has_nan_loss"]]
             valid_runs = [r for r in runs if not r["has_nan_loss"]]
             if nan_runs and not valid_runs:
-                nan_methods_by_value[sweep_value].append(METHOD_LABELS[method_key])
+                nan_methods_by_index[sweep_idx].append(METHOD_LABELS[method_key])
             for r in valid_runs:
                 for h in r["train_history"]:
                     all_records.append({
-                        "Sweep Value": sweep_value,
+                        "Sweep Index": sweep_idx,
                         "Integration Step": h["train/integration_step"],
                         "Accuracy (%)": h["train/batch_final_accuracy"] * 100,
                         "Method": METHOD_LABELS[method_key],
@@ -237,7 +249,7 @@ def _accuracy_vs_integration_step_common(all_data, sweep_vars, sweep_values):
                     })
 
     df_all = pd.DataFrame(all_records) if all_records else pd.DataFrame()
-    return n_values, n_cols, n_rows, method_order, palette, df_all, nan_methods_by_value
+    return n_values, n_cols, n_rows, method_order, palette, df_all, nan_methods_by_index
 
 
 def _finalize_accuracy_subplot(fig, axes, n_values, n_cols, n_rows, method_order, palette, title, out_path, dpi):
@@ -263,7 +275,7 @@ def plot_accuracy_vs_integration_step_mean(all_data, sweep_vars, sweep_labels, s
     result = _accuracy_vs_integration_step_common(all_data, sweep_vars, sweep_values)
     if result is None:
         return
-    n_values, n_cols, n_rows, method_order, palette, df_all, nan_methods_by_value = result
+    n_values, n_cols, n_rows, method_order, palette, df_all, nan_methods_by_index = result
 
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4 * n_rows), squeeze=False)
 
@@ -271,7 +283,7 @@ def plot_accuracy_vs_integration_step_mean(all_data, sweep_vars, sweep_labels, s
         ax = axes[idx // n_cols][idx % n_cols]
 
         if not df_all.empty:
-            df_value = df_all[df_all["Sweep Value"] == sweep_value]
+            df_value = df_all[df_all["Sweep Index"] == idx]
             if len(df_value) > 0:
                 n_seeds = df_value.groupby(["Method", "Integration Step"]).size().groupby("Method").first()
                 has_multi = (n_seeds > 1).any()
@@ -293,13 +305,13 @@ def plot_accuracy_vs_integration_step_mean(all_data, sweep_vars, sweep_labels, s
                 if mean_curves:
                     ax.set_xlim(0, _early_segment_xlim(mean_curves))
 
-        for m in nan_methods_by_value.get(sweep_value, []):
+        for m in nan_methods_by_index[idx]:
             ax.plot([], [], color=palette[m], label=f"{m} (diverged)")
 
         ax.set_title(format_sweep_value(sweep_value, sweep_labels), fontweight="bold")
         ax.set_ylim(-2, 102)
 
-        if df_all.empty and not nan_methods_by_value.get(sweep_value):
+        if df_all.empty and not nan_methods_by_index[idx]:
             ax.text(0.5, 0.5, "No data", transform=ax.transAxes,
                     ha="center", va="center", color="gray")
 
@@ -314,7 +326,7 @@ def plot_accuracy_vs_integration_step_seeds(all_data, sweep_vars, sweep_labels, 
     result = _accuracy_vs_integration_step_common(all_data, sweep_vars, sweep_values)
     if result is None:
         return
-    n_values, n_cols, n_rows, method_order, palette, df_all, nan_methods_by_value = result
+    n_values, n_cols, n_rows, method_order, palette, df_all, nan_methods_by_index = result
 
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4 * n_rows), squeeze=False)
 
@@ -322,7 +334,7 @@ def plot_accuracy_vs_integration_step_seeds(all_data, sweep_vars, sweep_labels, 
         ax = axes[idx // n_cols][idx % n_cols]
 
         if not df_all.empty:
-            df_value = df_all[df_all["Sweep Value"] == sweep_value]
+            df_value = df_all[df_all["Sweep Index"] == idx]
             if len(df_value) > 0:
                 sns.lineplot(
                     data=df_value, x="Integration Step", y="Accuracy (%)",
@@ -342,13 +354,13 @@ def plot_accuracy_vs_integration_step_seeds(all_data, sweep_vars, sweep_labels, 
                 if mean_curves:
                     ax.set_xlim(0, _early_segment_xlim(mean_curves))
 
-        for m in nan_methods_by_value.get(sweep_value, []):
+        for m in nan_methods_by_index[idx]:
             ax.plot([], [], color=palette[m], label=f"{m} (diverged)")
 
         ax.set_title(format_sweep_value(sweep_value, sweep_labels), fontweight="bold")
         ax.set_ylim(-2, 102)
 
-        if df_all.empty and not nan_methods_by_value.get(sweep_value):
+        if df_all.empty and not nan_methods_by_index[idx]:
             ax.text(0.5, 0.5, "No data", transform=ax.transAxes,
                     ha="center", va="center", color="gray")
 
@@ -380,8 +392,9 @@ def plot_final_test_accuracy_bar(all_data, sweep_vars, sweep_labels, sweep_value
         print(f"WARNING: No values found for {sweep_vars}, skipping final test accuracy plot.")
         return
 
-    x_values = sort_sweep_values({value[0] for value in sweep_values})
-    facet_values = sort_sweep_values({value[1] for value in sweep_values}) if len(sweep_vars) == 2 else [None]
+    x_values = sort_sweep_values(unique_sweep_values(value[0] for value in sweep_values))
+    facet_values = (sort_sweep_values(unique_sweep_values(value[1] for value in sweep_values))
+                    if len(sweep_vars) == 2 else [None])
     method_order = [METHOD_LABELS[key] for key in METHOD_KEYS if key in all_data]
     n_cols = min(4, len(facet_values))
     n_rows = (len(facet_values) + n_cols - 1) // n_cols
@@ -495,8 +508,10 @@ def main(cfg: DictConfig):
             sweep_vars, sweep_labels
         )
 
-    values_by_var = [sort_sweep_values({run_data["sweep_values"][sweep_var]
-                                        for runs in all_data.values() for run_data in runs})
+    values_by_var = [sort_sweep_values(unique_sweep_values(
+                        run_data["sweep_values"][sweep_var]
+                        for runs in all_data.values() for run_data in runs
+                    ))
                      for sweep_var in sweep_vars]
     sweep_values = list(product(*values_by_var))
     print(f"\nSweep grid: {[format_sweep_value(value, sweep_labels) for value in sweep_values]}")
