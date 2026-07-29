@@ -71,6 +71,18 @@ def default_data_transforms(cfg):
             img_transforms.append(Flatten())
 
         return transforms.Compose(img_transforms), OneHot(10, soft_onehot=True)
+    elif cfg.name == "cifar10":
+        img_transforms = [transforms.ToImage(),
+                          transforms.ToDtype(torch.float32, scale=True)]
+        if cfg.normalize:
+            img_transforms.append(transforms.Normalize(
+                (0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)
+            ))
+        img_transforms.append(JaxImageOrder())
+        if cfg.flatten:
+            img_transforms.append(Flatten())
+
+        return transforms.Compose(img_transforms), OneHot(10, soft_onehot=True)
     elif cfg.name == "emnist":
         img_transforms = [transforms.ToImage(),
                           transforms.ToDtype(torch.float32, scale=True),
@@ -131,6 +143,23 @@ def load_dataset(cfg, rng_key, transforms = (None, None)):
                 target_transform=transforms[1],
             ),
             "test": datasets.FashionMNIST(
+                "~/torchvision",
+                train=False,
+                download=True,
+                transform=transforms[0],
+                target_transform=transforms[1],
+            ),
+        }
+    elif cfg.name == "cifar10":
+        return {
+            "train": datasets.CIFAR10(
+                "~/torchvision",
+                train=True,
+                download=True,
+                transform=transforms[0],
+                target_transform=transforms[1],
+            ),
+            "test": datasets.CIFAR10(
                 "~/torchvision",
                 train=False,
                 download=True,

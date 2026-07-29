@@ -1,0 +1,5 @@
+name: cifar10
+input_shape: [32, 32, 3]
+nclasses: 10
+flatten: false
+normalize: true
