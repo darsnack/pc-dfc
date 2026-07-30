@@ -1,0 +1,29 @@
+program: train-approx-pc.py
+name: apx_pc_cifar10_nudge_scaling
+method: grid
+parameters:
+  data:
+    value: cifar10
+  model.activation_fn:
+    value: tanh
+  # use this format for nesting
+  # cause otherwise hydra is confused
+  # (see https://github.com/wandb/wandb/issues/4686#issuecomment-2407556397)
+  training.learning_rate:
+    value: 1e-8
+  nudge.scaling_factor:
+    values:
+     - 0.2
+     - 0.4
+     - 0.6
+     - 0.8
+command:
+- ${env}
+- PYTHONFAULTHANDLER=1
+- XLA_PYTHON_CLIENT_PREALLOCATE=0
+- uv
+- run
+- ${program}
+# this is hydra interpolation not wandb
+- hydra.run.dir=./outputs/apx_pc_cifar10_nudge_scaling/lr_${training.learning_rate}_nudgescale_${nudge.scaling_factor}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+- ${args_no_hyphens}
