@@ -420,7 +420,7 @@ def main(cfg):
     # Get the optimizer
     if cfg.training.adam:
         opt = nnx.Optimizer(model,
-                            optax.adamw(learning_rate=cfg.training.learning_rate, weight_decay=1e-5),
+                            optax.adamw(learning_rate=cfg.training.learning_rate, weight_decay=1e-4),
                             wrt=nnx.Param)
     else:
         opt = nnx.Optimizer(model, optax.sgd(learning_rate=cfg.training.learning_rate), wrt=nnx.Param)

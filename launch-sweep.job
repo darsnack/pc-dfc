@@ -12,11 +12,11 @@
 set -uo pipefail
 
 if [[ $# -ne 2 ]]; then
-    echo "Usage: $0 SWEEP_FILE RUNS_PER_GPU_JOB" >&2
+    echo "Usage: $0 SWEEP_FILE_OR_ID RUNS_PER_GPU_JOB" >&2
     exit 2
 fi
 
-SWEEP_FILE=$1
+SWEEP_SOURCE=$1
 RUNS_PER_GPU_JOB=$2
 if ! [[ $RUNS_PER_GPU_JOB =~ ^[1-9][0-9]*$ ]]; then
     echo "RUNS_PER_GPU_JOB must be a positive integer." >&2
@@ -25,7 +25,7 @@ fi
 
 # Create the sweep once, then divide its runs among GPU jobs. Each GPU job
 # starts up to RUNS_PER_GPU_JOB agents on its single allocated GPU.
-read SLURM_SWEEP_ID NJOBS <<< "$(uv run setup-sweep.py "$SWEEP_FILE" | tail -n 1)"
+read SLURM_SWEEP_ID NJOBS <<< "$(uv run setup-sweep.py "$SWEEP_SOURCE" | tail -n 1)"
 if ! [[ $NJOBS =~ ^[1-9][0-9]*$ ]]; then
     echo "Could not determine a positive run count for sweep ${SLURM_SWEEP_ID:-<unknown>}." >&2
     exit 1

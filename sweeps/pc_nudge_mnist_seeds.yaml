@@ -12,7 +12,7 @@ parameters:
   # cause otherwise hydra is confused
   # (see https://github.com/wandb/wandb/issues/4686#issuecomment-2407556397)
   training.learning_rate:
-    value: 0.0000001
+    value: 1e-6
   training.epochs:
     value: 50
   training.adam:

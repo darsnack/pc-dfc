@@ -4,17 +4,17 @@ method: grid
 parameters:
   data:
     value: cifar10
-  model.activation_fn:
-    values:
-      - tanh
-      - relu
+  # model.activation_fn:
+  #   values:
+  #     - tanh
+  #     - relu
   # use this format for nesting
   # cause otherwise hydra is confused
   # (see https://github.com/wandb/wandb/issues/4686#issuecomment-2407556397)
   training.learning_rate:
     values:
-      - 1e-6
-      - 1e-7
+      # - 1e-6
+      # - 1e-7
       - 1e-8
       - 1e-9
 command:
