@@ -5,6 +5,8 @@ defaults:
 
 experiment_dir: ???
 dpi: 300
+# For nonlinear-experiment.py data: null freezes the initial linearization.
+relinearize_steps: null
 hydra:
   output_subdir: null
   run:

@@ -1,0 +1,12 @@
+experiment_dir: ???
+trajectory_plot_vals: [null, 50, 25, 1]
+loss_plot_vals: [null, 150, 75, 25, 5, 1]
+dpi: 300
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+defaults:
+- _self_
+- override hydra/hydra_logging: disabled
+- override hydra/job_logging: disabled

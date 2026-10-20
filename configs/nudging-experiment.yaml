@@ -1,0 +1,18 @@
+seed: 10
+dynamics:
+  time_constant: 10.0
+  free_min_timesteps: 10
+  free_max_timesteps: 100000
+  clamp_timesteps: 100000
+  convergence_tolerance: 1e-8
+nudge:
+  max_count: 1000
+  convergence_tolerance: 1e-10
+scaling_factors: [0.05, 0.1, 0.6, 0.8, 0.9, 0.99, 1.0]
+hydra:
+  job:
+    chdir: true
+defaults:
+- _self_
+- override hydra/hydra_logging: disabled
+- override hydra/job_logging: disabled

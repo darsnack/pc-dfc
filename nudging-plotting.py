@@ -1,20 +1,12 @@
-"""Plot activation trajectories for a single condition from approximation-sweeps results.
-
-Produces per-layer raw timeseries and PCA-space trajectory plots. In PCA space,
-re-linearization events and nudge boundaries are marked with distinct scatter points.
-
-Example:
-  uv run approximation-sweeps-plot-traj.py experiment_dir=./outputs \\
-      noise=1.0 layers=6 rs=null sf=1.0
-"""
-import json
+"""Plot nudging activation trajectories, PCA trajectories, and final errors from saved nudging results."""
 import pickle
+from pathlib import Path
+
 import hydra
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 from hydra.utils import to_absolute_path
-from pathlib import Path
 
 
 def save_fig(fig: plt.Figure, path: Path, dpi: int) -> None:
@@ -38,22 +30,8 @@ def fit_pca(traj_a: np.ndarray, traj_b: np.ndarray):
     return project, min(2, n_dim)
 
 
-def relinearization_indices(nudge_step_counts: list[int],
-                             relinearize_steps,
-                             history_len: int) -> list[int]:
-    """History indices where re-linearization occurred."""
-    indices = []
-    cumulative = 0
-    for nudge_steps in nudge_step_counts:
-        step_size = relinearize_steps if relinearize_steps is not None else nudge_steps
-        t = 0
-        while t < nudge_steps:
-            idx = cumulative + t
-            if idx < history_len:
-                indices.append(idx)
-            t += step_size
-        cumulative += nudge_steps
-    return indices
+def relinearization_indices(nudge_step_counts: list[int], history_len: int) -> list[int]:
+    return [int(i) for i in np.cumsum([0, *nudge_step_counts[:-1]]) if i < history_len]
 
 
 def nudge_boundary_indices(nudge_step_counts: list[int], history_len: int) -> list[int]:
@@ -67,74 +45,37 @@ def nudge_boundary_indices(nudge_step_counts: list[int], history_len: int) -> li
     return indices
 
 
-def find_index(sweep: list, value, name: str) -> int:
-    for i, v in enumerate(sweep):
-        if v == value:
-            return i
-    raise ValueError(f"{name}={value!r} not found in sweep {sweep}")
-
-
-@hydra.main(config_path="./configs", config_name="approx-sweep-plot-traj", version_base=None)
-def main(cfg) -> None:
+@hydra.main(config_path="./configs", config_name="nudging-plotting", version_base=None)
+def main(cfg):
     base_dir = Path(to_absolute_path(cfg.experiment_dir)).resolve()
-    if not base_dir.exists():
-        raise FileNotFoundError(f"Experiment directory does not exist: {base_dir}")
+    with (base_dir / "simulation_data.pkl").open("rb") as f:
+        sim_data = pickle.load(f)
 
     sns.set_context("paper", font_scale=2)
     sns.set_style("ticks")
     sns.set_palette("colorblind")
 
-    manifest_file = base_dir / "approximation_sweeps_manifest.json"
-    if not manifest_file.exists():
-        raise FileNotFoundError("Missing manifest. Run approximation-sweeps.py first.")
-    with manifest_file.open("r") as f:
-        manifest = json.load(f)
-
-    # Find the pkl for the requested layer count
-    target_layers = int(cfg.layers)
-    run_meta = next((r for r in manifest["runs"] if r["total_layers"] == target_layers), None)
-    if run_meta is None:
-        available = [r["total_layers"] for r in manifest["runs"]]
-        raise ValueError(f"layers={target_layers} not found. Available: {available}")
-
-    with (base_dir / run_meta["data_file"]).open("rb") as f:
-        sim_data = pickle.load(f)
-
-    noise_sweep = [float(x) for x in sim_data["noise_sweep"]]
-    rs_sweep    = sim_data["relinearize_steps_sweep"]  # list of int or None
-    sf_sweep    = [float(x) for x in sim_data["scaling_factor_sweep"]]
+    sf_idx = list(sim_data["scaling_factors"]).index(float(cfg.sf))
     layer_labels = sim_data["layer_labels"]
-    fp_output   = np.asarray(sim_data["fp_output"])
-    noise_dir   = np.asarray(sim_data["noise_dir"])
-    free_history = sim_data["free_history"]
-    n_layers    = len(layer_labels)
-
-    # Resolve requested condition
-    cfg_rs    = None if cfg.rs is None else int(cfg.rs)
-    noise_idx = find_index(noise_sweep, float(cfg.noise), "noise")
-    rs_idx    = find_index(rs_sweep, cfg_rs, "rs")
-    sf_idx    = find_index(sf_sweep, float(cfg.sf), "sf")
-    magnitude = noise_sweep[noise_idx]
-
-    pcn_hist    = sim_data["pcn_sweep_history"][noise_idx]
-    approx_hist = sim_data["approx_sweep_history"][rs_idx][sf_idx][noise_idx]
-    nudge_steps = sim_data["approx_nudge_steps"][rs_idx][sf_idx][noise_idx]
-
-    rs_str = "null" if cfg_rs is None else str(cfg_rs)
-    title_suffix = f"noise={magnitude:.2f},  rs={rs_str},  sf={cfg.sf:.2f},  layers={target_layers}"
-
-    # Full trajectories (free phase + clamped phase)
-    t_free = free_history[0].shape[0]  # rows in free phase history
-    pcn_full    = [np.concatenate([free_history[l], pcn_hist[l][1:]],    axis=0) for l in range(n_layers)]
-    approx_full = [np.concatenate([free_history[l], approx_hist[l][1:]], axis=0) for l in range(n_layers)]
-
-    pcn_color     = sns.color_palette()[0]
-    approx_color  = sns.color_palette()[1]
-    relin_color   = "crimson"
-    nudge_color   = "darkorange"
-
-    out_dir = base_dir / run_meta["out_dir"] / f"traj_noise{magnitude:.2f}_rs{rs_str}_sf{cfg.sf:.2f}"
+    n_layers = len(layer_labels)
+    pcn_hist = sim_data["pcn_history"]
+    approx_hist = sim_data["approx_histories"][sf_idx]
+    nudge_steps = sim_data["nudge_steps"][sf_idx]
+    title_suffix = f"noise=1.00,  rs=null,  sf={cfg.sf:.2f},  layers=6"
+    pcn_color = sns.color_palette()[0]
+    approx_color = sns.color_palette()[1]
+    relin_color = "crimson"
+    out_dir = base_dir / f"traj_sf{cfg.sf:.2f}"
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    free_history = sim_data["free_history"]
+    fp_output = np.asarray(sim_data["fp_output"])
+    noise_dir = np.asarray(sim_data["noise_dir"])
+    magnitude = 1.0
+    nudge_color = "darkorange"
+    t_free = free_history[0].shape[0]
+    pcn_full = [np.concatenate([free_history[l], pcn_hist[l][1:]], axis=0) for l in range(n_layers)]
+    approx_full = [np.concatenate([free_history[l], approx_hist[l][1:]], axis=0) for l in range(n_layers)]
 
     # ── Raw timeseries (one figure per layer) ────────────────────────────────
     for layer_idx in range(n_layers):
@@ -143,7 +84,7 @@ def main(cfg) -> None:
         n_neurons  = pcn_acts.shape[1]
         T_approx   = approx_hist[layer_idx].shape[0]
 
-        relin_idx = relinearization_indices(nudge_steps, cfg_rs, T_approx)
+        relin_idx = relinearization_indices(nudge_steps, T_approx)
         nudge_idx = nudge_boundary_indices(nudge_steps, T_approx)
 
         fig, axes = plt.subplots(1, n_neurons,
@@ -182,7 +123,6 @@ def main(cfg) -> None:
         save_fig(fig, out_dir / f"dynamics_layer{layer_idx + 1}", cfg.dpi)
         plt.close(fig)
 
-    # ── PCA trajectories (all layers in one figure) ───────────────────────────
     fig_pca, axes_pca = plt.subplots(1, n_layers,
                                      figsize=(4.5 * n_layers, 4.5),
                                      squeeze=False)
@@ -197,12 +137,10 @@ def main(cfg) -> None:
         pcn_proj    = project(pcn_layer)
         approx_proj = project(approx_layer)
 
-        # trajectories
         ax.plot(pcn_proj[:, 0], pcn_proj[:, 1],
                 color=pcn_color, lw=1.8, label="PCN")
         ax.plot(approx_proj[:, 0], approx_proj[:, 1],
                 color=approx_color, lw=1.8, label="Approx. PC")
-        # start / end markers
         ax.scatter(pcn_proj[0, 0], pcn_proj[0, 1],
                    marker="o", s=50, facecolors="none", edgecolors=pcn_color, lw=1.5, zorder=5)
         ax.scatter(pcn_proj[-1, 0], pcn_proj[-1, 1],
@@ -211,18 +149,10 @@ def main(cfg) -> None:
                    marker="o", s=50, facecolors="none", edgecolors=approx_color, lw=1.5, zorder=5)
         ax.scatter(approx_proj[-1, 0], approx_proj[-1, 1],
                    marker="+", s=100, color=approx_color, lw=1.5, zorder=5)
-        # re-linearization markers
-        relin_idx = relinearization_indices(nudge_steps, cfg_rs, T_approx)
-        valid_relin = [i for i in relin_idx if i < len(approx_proj)]
+        valid_relin = relinearization_indices(nudge_steps, T_approx)
         if valid_relin:
             ax.scatter(approx_proj[valid_relin, 0], approx_proj[valid_relin, 1],
                        marker=".", s=60, color=relin_color, zorder=8, label="Relinearization")
-        # nudge boundary markers
-        # nudge_idx = nudge_boundary_indices(nudge_steps, T_approx)
-        # valid_nudge = [i for i in nudge_idx if i < len(approx_proj)]
-        # if valid_nudge:
-        #     ax.scatter(approx_proj[valid_nudge, 0], approx_proj[valid_nudge, 1],
-        #                marker="^", s=80, color=nudge_color, zorder=9, label="Nudge boundary")
         ax.set_xlabel("PC 1")
         ax.set_ylabel("PC 2" if n_components >= 2 else "(1D only)")
         ax.set_title(layer_labels[layer_idx])
@@ -241,6 +171,50 @@ def main(cfg) -> None:
     fig_pca.tight_layout(rect=[0, 0.06, 1, 1])
     save_fig(fig_pca, out_dir / "dynamics_pca", cfg.dpi)
     plt.close(fig_pca)
+
+    final_errors = np.asarray(sim_data["final_errors"])
+    approx_nudge_counts = [len(steps) for steps in sim_data["nudge_steps"]]
+    sf_sweep = [float(x) for x in sim_data["scaling_factors"]]
+
+    x_labels = [f"{sf:g}" for sf in sf_sweep]
+    layer_palette = dict(zip(layer_labels, sns.light_palette("seagreen", len(layer_labels) + 1)[1:]))
+
+    fig, ax = plt.subplots(figsize=(max(6, 0.8 * len(sf_sweep) + 3.5), 5))
+    for layer_idx, layer_label in enumerate(layer_labels):
+        final_diffs = final_errors[:, layer_idx]
+        sns.lineplot(x=x_labels, y=final_diffs, marker="o", linewidth=1.5,
+                     sort=False, color=layer_palette[layer_label],
+                     label=layer_label, ax=ax)
+
+    ax.axhline(sim_data["nudge_convergence_tolerance"], color="#7a7a7a", linewidth=0.9,
+               linestyle="--", alpha=0.65)
+    ax.set_yscale("log")
+    ax.set_xlabel("Scaling factor")
+    ax.set_ylabel(r"$\|\mathbf{v}_\mathrm{approx}^T - \mathbf{v}_\mathrm{PCN}^T\|$")
+    ax.set_title("Final activation diff  |  layers=6  |  noise=1.00  |  rs=null",
+                 pad=20, fontweight="bold")
+    ax.legend(frameon=False, loc="upper left", bbox_to_anchor=(1.2, 1))
+    plt.xticks(rotation=45, ha="right")
+    sns.despine(ax=ax)
+
+    ax_nudge = ax.twinx()
+    nudge_counts = approx_nudge_counts
+    ax_nudge.plot(x_labels, nudge_counts, marker="s", linestyle="--",
+                  color="#7a7a7a", linewidth=1.2, markersize=5, zorder=5)
+    ax_nudge.set_ylim(0.9, None)
+    ax_nudge.set_yscale("log")
+    ax_nudge.set_ylabel("# of Nudges")
+    nudge_handle = plt.Line2D([], [], color="#7a7a7a", marker="s", linestyle="--",
+                               linewidth=1.2, markersize=5, label="Nudges")
+    ax_nudge.legend(handles=[nudge_handle], frameon=False, loc="lower left",
+                    bbox_to_anchor=(1.2, 0))
+    plt.xticks(rotation=45, ha="right")
+
+    fig.tight_layout()
+
+    out_path = base_dir / "final_loss"
+    save_fig(fig, out_path, cfg.dpi)
+    plt.close(fig)
 
 
 if __name__ == "__main__":
