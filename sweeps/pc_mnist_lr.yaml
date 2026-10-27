@@ -1,5 +1,5 @@
 program: train-pcn.py
-name: pc_mnist_lr`
+name: pc_mnist_lr
 method: grid
 parameters:
   data:
