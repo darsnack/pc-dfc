@@ -61,7 +61,7 @@ def fit_pca(traj_a: np.ndarray, traj_b: np.ndarray):
 
     return project, n_components
 
-def plot_single_run(sim_data: dict, out_dir: Path, dpi: int):
+def plot_single_run(sim_data: dict, out_dir: Path, dpi: int, focus_magnitude=None):
     # make sure output directory exists
     out_dir.mkdir(parents=True, exist_ok=True)
     # read experiement data
@@ -180,6 +180,8 @@ def plot_single_run(sim_data: dict, out_dir: Path, dpi: int):
     else:
         focus_noise = diff_matrix.shape[0] - 1
         focus_layer = 0
+    if focus_magnitude in noise_sweep:
+        focus_noise = noise_sweep.index(focus_magnitude)
     focus_project, _ = pca_fns[focus_layer]
     focus_pcn_proj = focus_project(pcn_history[focus_noise][focus_layer])[:, :2]
     focus_approx_proj = focus_project(approx_history[focus_noise][focus_layer])[:, :2]
@@ -279,34 +281,29 @@ def main(cfg) -> None:
     sns.set_style("ticks")
     sns.set_palette("colorblind")
     # read in experiment manifest
-    manifest_file = base_dir / "approximation_experiment_manifest.json"
+    manifest_file = base_dir / "linear_experiment_manifest.json"
     if not manifest_file.exists():
-        raise FileNotFoundError("Missing experiment manifest. Run approximation-experiment.py first.")
+        raise FileNotFoundError("Missing experiment manifest. Run linear-experiment.py first.")
     with manifest_file.open("r", encoding="utf-8") as f:
         manifest = json.load(f)
     # plot individual run plots
-    for run_meta in manifest.get("runs", []):
+    for run_meta in manifest["runs"]:
         run_dir = base_dir / run_meta["out_dir"]
         data_file = base_dir / run_meta["data_file"]
         sim_data = load_simulation_data(data_file)
-        plot_single_run(sim_data, run_dir, cfg.dpi)
+        focus_magnitude = cfg.focus_noise.get(run_meta["total_layers"])
+        plot_single_run(sim_data, run_dir, cfg.dpi, focus_magnitude=focus_magnitude)
     # plot summary file
-    summary_rel = manifest.get("summary_file")
-    if summary_rel is not None:
-        summary_file = base_dir / summary_rel
-        summary_npz = np.load(summary_file)
-        summary_matrix = np.asarray(summary_npz["summary_matrix"])
-        total_layers_list = [int(x) for x in np.asarray(summary_npz["total_layers_list"])]
-        noise_sweep = [float(x) for x in np.asarray(summary_npz["noise_sweep"])]
-        # if "convergence_tolerance" in summary_npz:
-        #     convergence_tolerance = float(np.asarray(summary_npz["convergence_tolerance"]))
-        # else:
-        #     convergence_tolerance = float(cfg.dynamics.convergence_tolerance)
-        plot_summary_heatmap(summary_matrix=summary_matrix,
-                             total_layers_list=total_layers_list,
-                             noise_sweep=noise_sweep,
-                             convergence_tolerance=1e-10,
-                             out_path=base_dir / "summary_heatmap")
+    summary_file = base_dir / manifest["summary_file"]
+    summary_npz = np.load(summary_file)
+    summary_matrix = np.asarray(summary_npz["summary_matrix"])
+    total_layers_list = [int(x) for x in np.asarray(summary_npz["total_layers_list"])]
+    noise_sweep = [float(x) for x in np.asarray(summary_npz["noise_sweep"])]
+    plot_summary_heatmap(summary_matrix=summary_matrix,
+                         total_layers_list=total_layers_list,
+                         noise_sweep=noise_sweep,
+                         convergence_tolerance=1e-10,
+                         out_path=base_dir / "summary_heatmap")
 
 
 if __name__ == "__main__":

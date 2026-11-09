@@ -1,9 +1,8 @@
 seed: 10
 model:
   input_dim: 1
-  hidden_dims: [8,8,8,8,8] #[8, 6, 4]
+  hidden_dims: [8, 8, 8, 8, 8]
   output_dim: 1
-  activation_fn: tanh   # identity, tanh, relu
   kernel_init_scale: 1.0
 dynamics:
   time_constant: 10.0
@@ -15,9 +14,6 @@ approx_pc:
   k: 1.0
 noise: 1.0
 relinearize_steps_sweep: [null, 150, 100, 75, 50, 25, 10, 5, 1] # null = one linearization for full run
-trajectory_plot_vals: [null, 50, 25, 1]     # subset of sweep to show in traj/pdiff plots
-loss_plot_vals: [null, 150, 75, 25, 5, 1]   # subset of sweep to show in final_loss_subset plot
-dpi: 300
 hydra:
   job:
     chdir: true

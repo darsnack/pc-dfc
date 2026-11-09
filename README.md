@@ -14,6 +14,43 @@ To run any command within the environment, preface the command with `uv run`:
 uv run python main.py
 ```
 
+## Reproduction
+
+Below are the instructions for reproducing the figures in the paper.
+
+### Figures 2–6
+
+Each experiment saves its simulation data independently of plotting. Run these commands from the repository root; the explicit output directories keep the saved results easy to find.
+
+We use the Jax CPU backend and 64-bit arithmetic for these experiments to ensure numerical accuracy. Set both environment variables before running the commands below:
+```sh
+export JAX_PLATFORMS=cpu
+export JAX_ENABLE_X64=1
+```
+
+Here is a summary of scripts associated with each figure:
+
+| Figures | Experiment | Plotting |
+| --- | --- | --- |
+| 2–3: linear networks | `linear-experiment.py` | `linear-approx-plotting.py` |
+| 4–5: nonlinear networks + relinearization | `nonlinear-experiment.py` | `nonlinear-plotting.py` |
+| 6: nudging | `nudging-experiment.py` | `nudging-plotting.py` |
+
+```sh
+uv run python linear-experiment.py hydra.run.dir=outputs/linear
+uv run python linear-approx-plotting.py experiment_dir=outputs/linear
+
+uv run python nonlinear-experiment.py hydra.run.dir=outputs/nonlinear
+uv run python nonlinear-plotting.py experiment_dir=outputs/nonlinear
+
+uv run python nudging-experiment.py hydra.run.dir=outputs/nudging
+uv run python nudging-plotting.py experiment_dir=outputs/nudging sf=0.1
+uv run python nudging-plotting.py experiment_dir=outputs/nudging sf=0.9
+```
+
+The YAML files under `configs/` with the same names contain the experiment and plotting settings.
+Plots are written alongside the saved data. Plotting can be rerun without simulating again.
+
 ### Using the cluster
 
 On the Slurm cluster, use `sbatch lauch-slurm.job` instead of `uv run`:

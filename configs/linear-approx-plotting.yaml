@@ -6,6 +6,8 @@ defaults:
 
 experiment_dir: ???
 dpi: 300
+# Perturbation sizes shown in Figure 2, keyed by network depth.
+focus_noise: {3: 0.5, 6: 50.0, 8: 50.0}
 # hydra change working directory
 # disable for this script
 hydra:

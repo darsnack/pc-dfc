@@ -1,0 +1,11 @@
+experiment_dir: ???
+sf: 1.0
+dpi: 300
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+defaults:
+- _self_
+- override hydra/hydra_logging: disabled
+- override hydra/job_logging: disabled
