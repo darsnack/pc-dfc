@@ -10,7 +10,7 @@ parameters:
   # cause otherwise hydra is confused
   # (see https://github.com/wandb/wandb/issues/4686#issuecomment-2407556397)
   training.learning_rate:
-    values: 
+    values:
       - 1e-8
       - 1e-5
   training.epochs:
@@ -19,7 +19,7 @@ parameters:
     value: true
   dynamics.convergence_tolerance:
     value: 1e-2
-  dynamics.time_constant: 
+  dynamics.time_constant:
     values:
       - 5
       - 10
@@ -31,6 +31,8 @@ parameters:
       - 0
       - 1
       - 2
+      - 3
+      - 4
 command:
 - ${env}
 - PYTHONFAULTHANDLER=1

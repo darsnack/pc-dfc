@@ -9,5 +9,6 @@ model:
   layer_dims: [784, 256, 256, 10] # including input/output dims.
   activation_fn: noop # noop or tanh
 training:
+  adam: true
   batch_size: 1024
-  learning_rate: 0.01
+  learning_rate: 0.0001

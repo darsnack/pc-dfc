@@ -46,12 +46,39 @@ def source_program(sweep_config: dict) -> str:
     return program
 
 
+def source_runs(api, source_id: str) -> list:
+    """Fetch a checked, unique run listing in creation order."""
+    listing = api.runs(
+        f"{ENTITY}/{PROJECT}",
+        filters={"sweep": source_id},
+        order="+created_at",
+        per_page=1000,
+    )
+    expected = len(listing)
+    runs = {}
+    duplicates = set()
+    for run in listing:
+        if run.id in runs:
+            duplicates.add(run.id)
+        else:
+            runs[run.id] = run
+    if duplicates:
+        print(f"Ignoring duplicate run IDs from W&B: {', '.join(sorted(duplicates))}", file=sys.stderr)
+    if len(runs) != expected:
+        raise RuntimeError(
+            f"incomplete run listing for sweep {source_id}: W&B reports {expected} "
+            f"runs but returned {len(runs)} unique IDs; retry after the source "
+            "sweep has stopped changing"
+        )
+    return list(runs.values())
+
+
 def continuation_manifest(api, source_id: str) -> tuple[Path, list[dict], dict]:
     """Build one continuation record for every source run with a checkpoint."""
     source_sweep = api.sweep(f"{ENTITY}/{PROJECT}/{source_id}")
     config = source_sweep.config
     program = source_program(config)
-    runs = list(source_sweep.runs)
+    runs = source_runs(api, source_id)
     print(f"Continuing source sweep {source_id}: {len(runs)} run(s)", file=sys.stderr)
 
     entries = []

@@ -3,15 +3,19 @@
 Downloads per-sample training data and test accuracy from wandb sweeps,
 caches it locally, and produces:
   1. Training batch final accuracy vs. integration step (one subplot per sweep value)
-  2. Final test accuracy across methods and sweep values
+  2. Training batch final accuracy vs. sample count (matching integration-step plots)
+  3. Final test accuracy across methods and sweep values
 
 Usage:
   uv run plot-learning-speed.py pc_sweep_id=??? approx_pc_sweep_id=??? pc_nudges_sweep_id=??? \
       [sweep_var=training.learning_rate] [sweep_label='Learning Rate'] [entity=...] [project=...] \
-      [cache_dir=...] [no_cache=...]
+      [fast=true] [download_workers=4] [history_page_size=10000] [cache_dir=...] [no_cache=...] [bp=88.83] [dfc=88.83] [strong-dfc=88.83]
 """
 
 import pickle
+import sys
+import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import product
 from pathlib import Path
 
@@ -32,6 +36,58 @@ METHOD_LABELS = {
 }
 METHOD_KEYS = tuple(METHOD_LABELS)
 METHOD_PALETTE = dict(zip(METHOD_LABELS.values(), sns.color_palette("colorblind", n_colors=len(METHOD_LABELS))))
+
+
+def parse_sweep_ids(value):
+    """Parse a single sweep ID or a comma-separated string of sweep IDs."""
+    sweep_ids = [sweep_id.strip() for sweep_id in value.split(",")]
+    if not all(sweep_ids):
+        raise ValueError("Sweep IDs must be nonempty (use comma-separated IDs).")
+    return sweep_ids
+
+
+def collect_merged_sweep_data(api, entity, project, sweep_ids, cache_dir, method_key,
+                              no_cache, sweep_vars, sweep_labels, fast=False,
+                              download_workers=4, history_page_size=10000):
+    """Combine sweeps, reporting overlapping grid points and avoiding repeated runs."""
+    results = []
+    seen_sweeps = set()
+    seen_runs = {}
+    for sweep_id in sweep_ids:
+        if sweep_id in seen_sweeps:
+            warnings.warn(f"Duplicate sweep ID {sweep_id} for {METHOD_LABELS[method_key]}; skipping.",
+                          stacklevel=2)
+            continue
+        seen_sweeps.add(sweep_id)
+        runs = collect_sweep_data(api, entity, project, sweep_id, cache_dir, method_key,
+                                  no_cache, sweep_vars, sweep_labels, fast=fast,
+                                  download_workers=download_workers, history_page_size=history_page_size)
+        # Compare across sweeps; a grid point overlaps only for the same seed.
+        previous_runs = list(results)
+        for run in runs:
+            run_id = run["run_id"]
+            if run_id in seen_runs:
+                warnings.warn(
+                    f"Duplicate run {run_id} in sweeps {seen_runs[run_id]} and {sweep_id} "
+                    f"for {METHOD_LABELS[method_key]}; skipping repeated run.", stacklevel=2)
+                continue
+            value = run_sweep_value(run, sweep_vars)
+            overlaps = [other for other in previous_runs
+                        if run_sweep_value(other, sweep_vars) == value
+                        and other.get("seed") == run.get("seed")]
+            if overlaps:
+                sources = ", ".join(
+                    f"{seen_runs[other['run_id']]}/{other['run_id']} (seed={other.get('seed')})"
+                    for other in overlaps
+                )
+                warnings.warn(
+                    f"Duplicate sweep grid point for {METHOD_LABELS[method_key]}: "
+                    f"{format_sweep_value(value, sweep_labels)}; "
+                    f"{sweep_id}/{run_id} (seed={run.get('seed')}) overlaps {sources}. "
+                    "Keeping distinct runs in the merged data.", stacklevel=2)
+            seen_runs[run_id] = sweep_id
+            results.append(run)
+    return results
 
 
 def get_config_value(config, key):
@@ -97,7 +153,7 @@ def format_sweep_value(sweep_value, sweep_labels):
     )
 
 
-TRAIN_KEYS = ["train/integration_step", "train/batch_final_accuracy", "train/batch_final_error", "epoch"]
+TRAIN_KEYS = ["train/integration_step", "train/batch_final_accuracy", "train/batch_final_error", "epoch", "train/sample"]
 
 
 def _is_nan(v):
@@ -109,11 +165,30 @@ def _is_nan(v):
         return False
 
 
-def download_run_data(run, cache_dir, no_cache, sweep_vars, pbar=None):
+def latest_test_history(run, history_page_size=10000):
+    """Fetch the last logged test accuracy, searching only the history tail first."""
+    end = run.lastHistoryStep + 1
+    window = 1000
+    while end > 0:
+        start = max(0, end - window)
+        rows = list(run.scan_history(
+            keys=["test/avg_epoch_accuracy"], min_step=start, max_step=end,
+            page_size=history_page_size,
+        ))
+        if rows:
+            return rows[-1:]
+        end = start
+        window *= 2
+    return []
+
+
+def download_run_data(run, cache_dir, no_cache, sweep_vars, pbar=None, fast=False,
+                      history_page_size=10000):
     cache_path = cache_dir / f"{run.id}.pkl"
+    # Summary-only downloads must never masquerade as full-history caches.
+    if fast and not (not no_cache and cache_path.exists()):
+        cache_path = cache_dir / f"{run.id}.fast.pkl"
     if not no_cache and cache_path.exists():
-        if pbar is not None:
-            pbar.set_postfix_str(f"cached {run.id[:8]}")
         with cache_path.open("rb") as f:
             data = pickle.load(f)
         # Cache config fields separately, so requesting a new sweep variable
@@ -129,10 +204,19 @@ def download_run_data(run, cache_dir, no_cache, sweep_vars, pbar=None):
             missing = [sweep_var for sweep_var in sweep_vars if sweep_values[sweep_var] is None]
             print(f"\n  WARNING: Could not find {missing!r} for run {run.id}")
             return None
-        return data
+        if (fast or set(TRAIN_KEYS).issubset(data.get("train_history_keys", []))
+                or all("train/sample" in row for row in data["train_history"])):
+            if pbar is not None:
+                pbar.set_postfix_str(f"cached {run.id[:8]}")
+            return data
+        # Older caches did not request the cumulative sample index.
+        # Reload the history so sample-count plots also work with existing caches.
+        print(f"\n  Refreshing cache for {run.id}: old history lacks train/sample")
 
+    if pbar is not None:
+        pbar.set_postfix_str(f"downloading {run.id[:8]}")
     train_history = []
-    for row in run.scan_history(keys=TRAIN_KEYS):
+    for row in (() if fast else run.scan_history(keys=TRAIN_KEYS, page_size=history_page_size)):
         if "train/integration_step" in row and "train/batch_final_accuracy" in row:
             train_history.append(row)
         if pbar is not None:
@@ -141,7 +225,11 @@ def download_run_data(run, cache_dir, no_cache, sweep_vars, pbar=None):
     test_acc = run.summary.get("test/avg_epoch_accuracy")
     test_epoch = run.summary.get("epoch")
     if test_acc is None:
-        for row in run.scan_history(keys=["test/avg_epoch_accuracy", "epoch"]):
+        # Search backwards in bounded windows if the summary is missing.
+        # Test metrics can be logged before the run's very last history row.
+        for row in (latest_test_history(run, history_page_size) if fast else
+                    run.scan_history(keys=["test/avg_epoch_accuracy", "epoch"],
+                                     page_size=history_page_size)):
             if "test/avg_epoch_accuracy" in row:
                 test_acc = row["test/avg_epoch_accuracy"]
                 test_epoch = row.get("epoch")
@@ -166,7 +254,9 @@ def download_run_data(run, cache_dir, no_cache, sweep_vars, pbar=None):
         "sweep_values": sweep_values,
         "seed": seed,
         "train_history": train_history,
-        "has_nan_loss": any(
+        # Record the request even if this run never logged every requested field.
+        "train_history_keys": [] if fast else list(TRAIN_KEYS),
+        "has_nan_loss": _is_nan(run.summary.get("train/batch_final_error")) if fast else any(
             _is_nan(r.get("train/batch_final_error"))
             for r in train_history
         ),
@@ -183,18 +273,52 @@ def download_run_data(run, cache_dir, no_cache, sweep_vars, pbar=None):
     return data
 
 
-def collect_sweep_data(api, entity, project, sweep_id, cache_dir, method_key, no_cache, sweep_vars, sweep_labels):
+def collect_sweep_data(api, entity, project, sweep_id, cache_dir, method_key, no_cache, sweep_vars, sweep_labels, fast=False,
+                              download_workers=4, history_page_size=10000):
     print(f"\n{METHOD_LABELS[method_key]} (sweep {sweep_id})")
-    sweep = api.sweep(f"{entity}/{project}/{sweep_id}")
-    runs = list(sweep.runs)
+    # Sweep.runs paginates without an explicit order. Page boundaries can then
+    # repeat runs and omit others, biasing particular sweep values and seeds.
+    runs = list(api.runs(
+        f"{entity}/{project}", filters={"sweep": sweep_id},
+        order="+created_at", per_page=100,
+    ))
+    seen_ids = set()
+    for run in runs:
+        if run.id in seen_ids:
+            raise ValueError(
+                f"Sweep {sweep_id} returned duplicate run {run.id}; "
+                "the run listing may also be missing runs. Retry the query."
+            )
+        seen_ids.add(run.id)
     print(f"  {len(runs)} runs in sweep")
+    if download_workers < 1 or history_page_size < 1:
+        raise ValueError("download_workers and history_page_size must be positive integers.")
+
+    def download(run):
+        return download_run_data(
+            run, cache_dir, no_cache, sweep_vars, fast=fast,
+            history_page_size=history_page_size,
+        )
+
+    # Each run is handled by exactly one worker. Keep results in listing order,
+    # independent of completion order, so seed and sweep merging stay stable.
+    downloaded = [None] * len(runs)
+    with ThreadPoolExecutor(max_workers=download_workers) as executor:
+        futures = {executor.submit(download, run): idx for idx, run in enumerate(runs)}
+        with tqdm(total=len(runs), desc="Downloading/caching runs", unit="run") as pbar:
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    downloaded[idx] = future.result()
+                except Exception as exc:
+                    for pending in futures:
+                        pending.cancel()
+                    raise RuntimeError(f"Failed to download run {runs[idx].id}") from exc
+                pbar.set_postfix_str(runs[idx].id[:8])
+                pbar.update(1)
+
     results = []
-    for run_idx, run in enumerate(runs):
-        run_values = tuple(get_config_value(run.config, sweep_var) for sweep_var in sweep_vars)
-        label = f"run {run_idx + 1}/{len(runs)} {format_sweep_value(run_values, sweep_labels)}"
-        pbar = tqdm(desc=label, unit=" rows", leave=True)
-        data = download_run_data(run, cache_dir, no_cache, sweep_vars, pbar)
-        pbar.close()
+    for run, data in zip(runs, downloaded):
         if data is not None:
             data["method"] = method_key
             n_train = len(data["train_history"])
@@ -214,10 +338,10 @@ def find_runs_for_sweep_value(runs, sweep_vars, sweep_value, exclude_nan=True):
     ]
 
 
-def _accuracy_vs_integration_step_common(all_data, sweep_vars, sweep_values):
+def _accuracy_vs_integration_step_common(all_data, sweep_vars, sweep_values, x_axis="Integration Step"):
     n_values = len(sweep_values)
     if n_values == 0:
-        print(f"WARNING: No values found for {sweep_vars}, skipping accuracy vs integration step plot.")
+        print(f"WARNING: No values found for {sweep_vars}, skipping accuracy vs {x_axis.lower()} plot.")
         return None
 
     n_cols = min(4, n_values)
@@ -239,10 +363,22 @@ def _accuracy_vs_integration_step_common(all_data, sweep_vars, sweep_values):
             if nan_runs and not valid_runs:
                 nan_methods_by_index[sweep_idx].append(METHOD_LABELS[method_key])
             for r in valid_runs:
+                # Training epochs are one-based, so the logged index includes
+                # an extra epoch. Align each run's first recorded sample to 1.
+                sample_origin = min(
+                    (h["train/sample"] for h in r["train_history"]
+                     if h.get("train/sample") is not None), default=0,
+                ) if x_axis == "Sample Count" else 0
                 for h in r["train_history"]:
+                    if x_axis == "Sample Count":
+                        if h.get("train/sample") is None:
+                            continue
+                        x_value = h["train/sample"] - sample_origin + 1
+                    else:
+                        x_value = h["train/integration_step"]
                     all_records.append({
                         "Sweep Index": sweep_idx,
-                        "Integration Step": h["train/integration_step"],
+                        x_axis: x_value,
                         "Accuracy (%)": h["train/batch_final_accuracy"] * 100,
                         "Method": METHOD_LABELS[method_key],
                         "seed": r.get("seed") if r.get("seed") is not None else r["run_id"],
@@ -271,8 +407,9 @@ def _finalize_accuracy_subplot(fig, axes, n_values, n_cols, n_rows, method_order
     plt.close(fig)
 
 
-def plot_accuracy_vs_integration_step_mean(all_data, sweep_vars, sweep_labels, sweep_values, output_dir, dpi=200):
-    result = _accuracy_vs_integration_step_common(all_data, sweep_vars, sweep_values)
+def plot_accuracy_vs_integration_step_mean(all_data, sweep_vars, sweep_labels, sweep_values, output_dir, dpi=200,
+                                                  x_axis="Integration Step"):
+    result = _accuracy_vs_integration_step_common(all_data, sweep_vars, sweep_values, x_axis)
     if result is None:
         return
     n_values, n_cols, n_rows, method_order, palette, df_all, nan_methods_by_index = result
@@ -285,25 +422,25 @@ def plot_accuracy_vs_integration_step_mean(all_data, sweep_vars, sweep_labels, s
         if not df_all.empty:
             df_value = df_all[df_all["Sweep Index"] == idx]
             if len(df_value) > 0:
-                n_seeds = df_value.groupby(["Method", "Integration Step"]).size().groupby("Method").first()
+                n_seeds = df_value.groupby(["Method", x_axis]).size().groupby("Method").first()
                 has_multi = (n_seeds > 1).any()
                 sns.lineplot(
-                    data=df_value, x="Integration Step", y="Accuracy (%)",
+                    data=df_value, x=x_axis, y="Accuracy (%)",
                     hue="Method", hue_order=method_order, palette=palette,
                     ax=ax, legend=False,
                     errorbar="sd" if has_multi else None,
                 )
-                mean_curves = []
-                if not df_value.empty:
+                if x_axis == "Sample Count":
+                    ax.set_xlim(0, max(1, df_value[x_axis].max()) * 1.02)
+                else:
+                    mean_curves = []
                     for m in method_order:
                         df_m = df_value[df_value["Method"] == m]
                         if len(df_m) > 0:
-                            grp = df_m.groupby("Integration Step")["Accuracy (%)"]
-                            mean_accs = grp.mean().values
-                            steps = grp.mean().index.values
-                            mean_curves.append((steps, mean_accs))
-                if mean_curves:
-                    ax.set_xlim(0, _early_segment_xlim(mean_curves))
+                            means = df_m.groupby(x_axis)["Accuracy (%)"].mean()
+                            mean_curves.append((means.index.values, means.values))
+                    if mean_curves:
+                        ax.set_xlim(0, _early_segment_xlim(mean_curves))
 
         for m in nan_methods_by_index[idx]:
             ax.plot([], [], color=palette[m], label=f"{m} (diverged)")
@@ -318,12 +455,13 @@ def plot_accuracy_vs_integration_step_mean(all_data, sweep_vars, sweep_labels, s
         sns.despine(ax=ax)
 
     _finalize_accuracy_subplot(fig, axes, n_values, n_cols, n_rows, method_order, palette,
-                               "Training Accuracy vs. Integration Step (mean ± SD)",
-                               output_dir / "accuracy_vs_integration_step_mean", dpi)
+                               f"Training Accuracy vs. {x_axis} (mean ± SD)",
+                               output_dir / f"accuracy_vs_{x_axis.lower().replace(' ', '_')}_mean", dpi)
 
 
-def plot_accuracy_vs_integration_step_seeds(all_data, sweep_vars, sweep_labels, sweep_values, output_dir, dpi=200):
-    result = _accuracy_vs_integration_step_common(all_data, sweep_vars, sweep_values)
+def plot_accuracy_vs_integration_step_seeds(all_data, sweep_vars, sweep_labels, sweep_values, output_dir, dpi=200,
+                                                  x_axis="Integration Step"):
+    result = _accuracy_vs_integration_step_common(all_data, sweep_vars, sweep_values, x_axis)
     if result is None:
         return
     n_values, n_cols, n_rows, method_order, palette, df_all, nan_methods_by_index = result
@@ -337,22 +475,22 @@ def plot_accuracy_vs_integration_step_seeds(all_data, sweep_vars, sweep_labels, 
             df_value = df_all[df_all["Sweep Index"] == idx]
             if len(df_value) > 0:
                 sns.lineplot(
-                    data=df_value, x="Integration Step", y="Accuracy (%)",
+                    data=df_value, x=x_axis, y="Accuracy (%)",
                     hue="Method", hue_order=method_order, palette=palette,
-                    units="seed", estimator=None,
-                    ax=ax, legend=False, alpha=0.4,
+                    ax=ax, legend=False,
+                    units="seed", estimator=None, alpha=0.4,
                 )
-                mean_curves = []
-                if not df_value.empty:
+                if x_axis == "Sample Count":
+                    ax.set_xlim(0, max(1, df_value[x_axis].max()) * 1.02)
+                else:
+                    mean_curves = []
                     for m in method_order:
                         df_m = df_value[df_value["Method"] == m]
                         if len(df_m) > 0:
-                            grp = df_m.groupby("Integration Step")["Accuracy (%)"]
-                            mean_accs = grp.mean().values
-                            steps = grp.mean().index.values
-                            mean_curves.append((steps, mean_accs))
-                if mean_curves:
-                    ax.set_xlim(0, _early_segment_xlim(mean_curves))
+                            means = df_m.groupby(x_axis)["Accuracy (%)"].mean()
+                            mean_curves.append((means.index.values, means.values))
+                    if mean_curves:
+                        ax.set_xlim(0, _early_segment_xlim(mean_curves))
 
         for m in nan_methods_by_index[idx]:
             ax.plot([], [], color=palette[m], label=f"{m} (diverged)")
@@ -367,8 +505,8 @@ def plot_accuracy_vs_integration_step_seeds(all_data, sweep_vars, sweep_labels, 
         sns.despine(ax=ax)
 
     _finalize_accuracy_subplot(fig, axes, n_values, n_cols, n_rows, method_order, palette,
-                               "Training Accuracy vs. Integration Step (individual seeds)",
-                               output_dir / "accuracy_vs_integration_step_seeds", dpi)
+                               f"Training Accuracy vs. {x_axis} (individual seeds)",
+                               output_dir / f"accuracy_vs_{x_axis.lower().replace(' ', '_')}_seeds", dpi)
 
 
 def _early_segment_xlim(curves, plateau_frac=0.9):
@@ -387,7 +525,8 @@ def _early_segment_xlim(curves, plateau_frac=0.9):
     return max_step
 
 
-def plot_final_test_accuracy_bar(all_data, sweep_vars, sweep_labels, sweep_values, output_dir, dpi=200):
+def plot_final_test_accuracy_bar(all_data, sweep_vars, sweep_labels, sweep_values, output_dir, dpi=200,
+                                 baselines=None):
     if not sweep_values:
         print(f"WARNING: No values found for {sweep_vars}, skipping final test accuracy plot.")
         return
@@ -435,6 +574,11 @@ def plot_final_test_accuracy_bar(all_data, sweep_vars, sweep_labels, sweep_value
                 legend_ax = ax
         for boundary in np.arange(len(x_order) - 1) + 0.5:
             ax.axvline(boundary, color="lightgrey", linewidth=0.8, zorder=0)
+        for baseline_idx, (label, mean) in enumerate((baselines or {}).items()):
+            ax.axhline(mean, label=label, color=sns.color_palette("colorblind", 6)[3 + baseline_idx],
+                       linestyle="--", linewidth=1.5)
+        if baselines and legend_ax is None:
+            legend_ax = ax
         for _, row in df_nan.iterrows():
             ax.text(x_order.index(row["Sweep Value"]), 2, r"$\times$", ha="center", va="bottom", color="black")
         if facet_value is not None:
@@ -447,10 +591,25 @@ def plot_final_test_accuracy_bar(all_data, sweep_vars, sweep_labels, sweep_value
     for idx in range(len(facet_values), n_rows * n_cols):
         axes[idx // n_cols][idx % n_cols].set_visible(False)
     handles, labels = legend_ax.get_legend_handles_labels() if legend_ax is not None else ([], [])
-    if handles:
-        fig.legend(handles[:len(method_order)], labels[:len(method_order)], frameon=False,
-                   loc="upper center", ncol=len(method_order), bbox_to_anchor=(0.5, 1.0))
+    for ax in axes.flat:
+        if ax.get_legend() is not None:
+            ax.get_legend().remove()
     fig.tight_layout()
+    if handles:
+        baseline_labels = set(baselines or {})
+        method_entries = [(handle, label) for handle, label in zip(handles, labels)
+                          if label not in baseline_labels]
+        baseline_entries = [(handle, label) for handle, label in zip(handles, labels)
+                            if label in baseline_labels]
+        legend_y = -0.02
+        for entries in (method_entries, baseline_entries):
+            if entries:
+                row_handles, row_labels = zip(*entries)
+                legend = fig.legend(row_handles, row_labels, frameon=False,
+                                    loc="upper center", ncol=len(entries),
+                                    bbox_to_anchor=(0.5, legend_y))
+                fig.canvas.draw()
+                legend_y -= legend.get_window_extent().height / fig.bbox.height + 0.01
     out_path = output_dir / "final_test_accuracy_point"
     fig.savefig(f"{out_path}.png", bbox_inches="tight", dpi=dpi)
     print(f"Saved {out_path}.png")
@@ -491,6 +650,15 @@ def main(cfg: DictConfig):
     sns.set_palette("colorblind")
 
     sweep_vars, sweep_labels = normalize_sweep_config(cfg.sweep_var, cfg.sweep_label)
+    baselines = {
+        label: float(cfg[key])
+        for key, label in [("bp", "Backpropagation"), ("dfc", "DFC"), ("strong-dfc", "Strong-DFC")]
+        if cfg.get(key) is not None
+    }
+
+    for key in ("download_workers", "history_page_size"):
+        if type(cfg[key]) is not int or cfg[key] < 1:
+            raise ValueError(f"{key} must be a positive integer.")
 
     api = wandb.Api(timeout=60)
 
@@ -503,9 +671,10 @@ def main(cfg: DictConfig):
         if sweep_id is None:
             print(f"\nSkipping {METHOD_LABELS[method_key]}: no sweep ID configured.")
             continue
-        all_data[method_key] = collect_sweep_data(
-            api, cfg.entity, cfg.project, sweep_id, cache_dir, method_key, cfg.no_cache,
-            sweep_vars, sweep_labels
+        all_data[method_key] = collect_merged_sweep_data(
+            api, cfg.entity, cfg.project, parse_sweep_ids(sweep_id), cache_dir, method_key, cfg.no_cache,
+            sweep_vars, sweep_labels, fast=cfg.fast,
+            download_workers=cfg.download_workers, history_page_size=cfg.history_page_size
         )
 
     values_by_var = [sort_sweep_values(unique_sweep_values(
@@ -526,14 +695,23 @@ def main(cfg: DictConfig):
             with_test = [r for r in valid_runs if r["test_accuracy"] is not None]
             print(f"  {METHOD_LABELS[method_key]:12s} {format_sweep_value(sweep_value, sweep_labels)}  {len(all_runs)} / {len(valid_runs)} / {len(with_test)}")
 
-    plot_accuracy_vs_integration_step_mean(
-        all_data, sweep_vars, sweep_labels, sweep_values, output_dir, cfg.dpi
-    )
-    plot_accuracy_vs_integration_step_seeds(
-        all_data, sweep_vars, sweep_labels, sweep_values, output_dir, cfg.dpi
-    )
+    if not cfg.fast:
+        plot_accuracy_vs_integration_step_mean(
+            all_data, sweep_vars, sweep_labels, sweep_values, output_dir, cfg.dpi
+        )
+        plot_accuracy_vs_integration_step_seeds(
+            all_data, sweep_vars, sweep_labels, sweep_values, output_dir, cfg.dpi
+        )
+        plot_accuracy_vs_integration_step_mean(
+            all_data, sweep_vars, sweep_labels, sweep_values, output_dir, cfg.dpi,
+            x_axis="Sample Count",
+        )
+        plot_accuracy_vs_integration_step_seeds(
+            all_data, sweep_vars, sweep_labels, sweep_values, output_dir, cfg.dpi,
+            x_axis="Sample Count",
+        )
     plot_final_test_accuracy_bar(
-        all_data, sweep_vars, sweep_labels, sweep_values, output_dir, cfg.dpi
+        all_data, sweep_vars, sweep_labels, sweep_values, output_dir, cfg.dpi, baselines=baselines
     )
     print_final_test_accuracy_summary(all_data, sweep_vars, sweep_labels, sweep_values)
 

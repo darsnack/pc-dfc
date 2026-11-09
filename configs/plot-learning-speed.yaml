@@ -1,3 +1,6 @@
+# Each method accepts one ID or comma-separated IDs. Quote the value for Hydra:
+# uv run plot-learning-speed.py pc_sweep_id="'abc123,def456'"
+# Overlapping grid points warn; distinct runs are retained, repeated run IDs skipped.
 pc_sweep_id: null
 approx_pc_sweep_id: null
 pc_nudges_sweep_id: null
@@ -8,7 +11,17 @@ entity: mitra-ryan-kyle
 project: pc-dfc
 cache_dir: ./.wandb_cache
 no_cache: false
+# Only final accuracy; use summaries instead of downloading training history.
+fast: false
+# Concurrent runs; set to 1 for sequential downloads.
+download_workers: 4
+# Rows per W&B history request (SDK default is 1000).
+history_page_size: 10000
 dpi: 200
+# Optional baseline mean accuracies in percent (for example, "88.83").
+bp: null
+dfc: null
+strong-dfc: null
 
 hydra:
   job:
